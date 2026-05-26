@@ -259,7 +259,7 @@ def _xp_config_yaml(cfg) -> str:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="forge")
-    parser.add_argument("-P", "--package", default="demo")
+    parser.add_argument("-P", "--package", default=None)
     parser.add_argument("-M", "--main-module", default="train")
     parser.add_argument("--config-dir")
     parser.add_argument("--config-name", default="config")
