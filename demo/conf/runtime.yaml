@@ -1,0 +1,5 @@
+runtime:
+  device: cpu
+  workers: 2
+  steps_per_epoch: 2
+  quiet: false
