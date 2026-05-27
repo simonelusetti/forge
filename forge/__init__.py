@@ -5,17 +5,19 @@ from .core import (
     canonical_signature,
     start_run,
 )
-from .commands import compose_cfg, info, purge, run, select, store_targets
+from .commands import GridRun, compose_cfg, grid, info, purge, run, select, store_targets
 from .matching import Selection, config_items
 
 __all__ = [
     "Experiment",
     "ExperimentRun",
     "ExperimentStore",
+    "GridRun",
     "Selection",
     "canonical_signature",
     "config_items",
     "compose_cfg",
+    "grid",
     "info",
     "purge",
     "run",

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 import importlib
 import importlib.util
+import itertools
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -137,6 +140,65 @@ def select(
         strict=strict,
     )
     return whole_experiments(matches) if whole_xps else matches
+
+
+@dataclass
+class GridRun:
+    overrides: list[str]
+    outcome: str  # "done" | "failed (exit N)" | "crashed: ExcType: msg"
+
+
+def grid(
+    package: str | None,
+    global_overrides: list[str],
+    direct: list[list[str]],
+    product: dict[str, list],
+    *,
+    main_module: str = "train",
+    config_dir: str | None = None,
+    config_name: str = "config",
+) -> list[GridRun]:
+    """Launch a grid of experiments sequentially and return their outcomes.
+
+    Each run receives *global_overrides* plus its own specific overrides.
+    *direct* and *product* are independent — direct runs are launched first,
+    then every combination from the cartesian product.  They do not cross.
+    """
+    runs_overrides: list[list[str]] = []
+
+    for run_overrides in direct:
+        runs_overrides.append(global_overrides + run_overrides)
+
+    if product:
+        keys = list(product.keys())
+        value_lists = [[str(v) for v in product[k]] for k in keys]
+        for combo in itertools.product(*value_lists):
+            combo_overrides = [f"{k}={v}" for k, v in zip(keys, combo)]
+            runs_overrides.append(global_overrides + combo_overrides)
+
+    if not runs_overrides:
+        runs_overrides.append(list(global_overrides))
+
+    # Remember cwd — start_run() does os.chdir(run_dir), so we must restore
+    # it after each run so that subsequent config lookups still work.
+    original_cwd = Path.cwd()
+    results: list[GridRun] = []
+    for overrides in runs_overrides:
+        try:
+            exit_code = run(
+                package, overrides,
+                main_module=main_module,
+                config_dir=config_dir,
+                config_name=config_name,
+            )
+            outcome = "done" if exit_code == 0 else f"failed (exit {exit_code})"
+        except Exception as exc:
+            outcome = f"crashed: {type(exc).__name__}: {exc}"
+        finally:
+            os.chdir(original_cwd)
+        results.append(GridRun(overrides=overrides, outcome=outcome))
+
+    return results
 
 
 def purge(targets: list[Selection]) -> None:

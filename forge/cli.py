@@ -1,15 +1,26 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import sys
-from textwrap import indent
+from typing import Any
 
-from omegaconf import OmegaConf
-from prettytable import PrettyTable
+import yaml
 
 from . import commands
-from .core import ExperimentRun, ExperimentStore, config_items
+from .core import ExperimentStore
+from .display import (
+    build_grid_table,
+    build_metrics_table,
+    print_config_matches,
+    print_purge_targets,
+    print_summary_matches,
+)
 
+
+# ---------------------------------------------------------------------------
+# Command handlers
+# ---------------------------------------------------------------------------
 
 def _run_command(args: argparse.Namespace) -> int:
     return commands.run(
@@ -42,7 +53,7 @@ def _info_command(args: argparse.Namespace) -> int:
         return 0
 
     if sigs_or_tags:
-        return _print_config_matches(matches)
+        return print_config_matches(matches)
 
     if args.sigs_only:
         for match in matches:
@@ -52,7 +63,7 @@ def _info_command(args: argparse.Namespace) -> int:
                     print(run.signature)
         return 0
 
-    _print_summary_matches(matches, xps_only=args.xps_only)
+    print_summary_matches(matches, xps_only=args.xps_only)
     return 0
 
 
@@ -71,7 +82,7 @@ def _purge_command(args: argparse.Namespace) -> int:
         return 0
 
     print("the following xps/runs will be deleted:")
-    _print_purge_targets(targets)
+    print_purge_targets(targets)
 
     if not args.force:
         answer = input("delete these files? [y/N] ")
@@ -112,6 +123,7 @@ def _metrics_command(args: argparse.Namespace) -> int:
         return 0
 
     # Resolve runs=None (whole-experiment selections from sig mode) by loading from store
+    from .core import ExperimentRun
     runs: list[ExperimentRun] = []
     for match in matches:
         if match.runs is not None:
@@ -124,39 +136,68 @@ def _metrics_command(args: argparse.Namespace) -> int:
         print("no runs found")
         return 0
 
-    print(_build_metrics_table(runs))
+    print(build_metrics_table(runs, long=args.long))
     return 0
 
 
-def _build_metrics_table(runs: list[ExperimentRun]) -> PrettyTable:
-    # Config keys that differ across experiments — identical keys add no information
-    all_cfg = {
-        run.signature: dict(config_items(run.experiment.config, ("forge.*", "runtime.*")))
-        for run in runs
-    }
-    all_keys = sorted({k for items in all_cfg.values() for k in items})
-    varying = [k for k in all_keys if len({str(items.get(k)) for items in all_cfg.values()}) > 1]
+def _grid_command(args: argparse.Namespace) -> int:
+    global_overrides: list[str] = list(args.globals or [])
+    direct: list[list[str]] = [list(r) for r in (args.direct or [])]
+    product: dict[str, list[Any]] = {}
 
-    # Metric keys present in any run
-    metric_keys = sorted({k for run in runs if run.metrics for k in run.metrics})
+    # Auto-detect a YAML file as the first positional arg: it must not contain
+    # "=" (ruling out Hydra overrides) and must exist on disk.
+    grid_file = args.grid_file
+    if not grid_file and global_overrides and "=" not in global_overrides[0]:
+        candidate = Path(global_overrides[0])
+        if candidate.is_file():
+            grid_file = str(candidate)
+            global_overrides = global_overrides[1:]
 
-    table = PrettyTable(["run", *varying, "launched", "status", *metric_keys])
-    table.align = "l"
+    if grid_file:
+        file_spec = _load_grid_file(grid_file)
+        # File values are base; CLI values layer on top
+        global_overrides = list(file_spec.get("globals", [])) + global_overrides
+        direct = [list(r) for r in file_spec.get("direct", [])] + direct
+        for k, v in file_spec.get("product", {}).items():
+            product.setdefault(k, v)
 
-    for run in runs:
-        cfg = all_cfg[run.signature]
-        launched = run.launched_on[:16].replace("T", " ")
-        status = "done" if run.finished_on else "running"
-        metrics = run.metrics or {}
-        table.add_row([
-            run.signature,
-            *[cfg.get(k, "—") for k in varying],
-            launched,
-            status,
-            *[metrics.get(k, "—") for k in metric_keys],
-        ])
+    for sweep in (args.sweeps or []):
+        key, sep, values_str = sweep.partition("=")
+        if not sep or not values_str:
+            return _usage_error(f"--sweep expects KEY=V1,V2,...  got {sweep!r}")
+        product[key] = values_str.split(",")
 
-    return table
+    if not direct and not product and not global_overrides:
+        return _usage_error(
+            "nothing to run — provide globals, --run, --sweep, or --file"
+        )
+
+    results = commands.grid(
+        args.package,
+        global_overrides,
+        direct,
+        product,
+        main_module=args.main_module,
+        config_dir=args.config_dir,
+        config_name=args.config_name,
+    )
+
+    print()
+    print(build_grid_table(results))
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# CLI utilities
+# ---------------------------------------------------------------------------
+
+def _load_grid_file(path: str) -> dict[str, Any]:
+    with open(path, encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    if not isinstance(data, dict):
+        raise ValueError(f"Grid file {path!r} must be a YAML mapping")
+    return data
 
 
 def _select(args: argparse.Namespace, *, whole_xps: bool = False) -> list[commands.Selection]:
@@ -177,63 +218,6 @@ def _mode(args: argparse.Namespace) -> str:
     return "sigs" if args.sigs else "tags" if args.tags else "overrides"
 
 
-def _print_config_matches(matches: list[commands.Selection]) -> int:
-    if not matches:
-        print("no xp found")
-        return 0
-
-    print(f"found {len(matches)} xp(s)")
-    for match in matches:
-        print()
-        xp = match.experiment
-        print(f"xp: {xp.signature}")
-        print(f"path: {xp.path}")
-        print("config:")
-        print(indent(_xp_config_yaml(xp.config), "  "))
-        for run in match.runs or []:
-            print()
-            print(f"  run: {run.signature}")
-            print(f"  path: {run.path}")
-            print("  runtime:")
-            print(indent(OmegaConf.to_yaml(run.config, resolve=True).rstrip(), "    "))
-            if run.metrics is not None:
-                print("  metrics:")
-                for k, v in run.metrics.items():
-                    print(f"    {k}: {v}")
-    return 0
-
-
-def _print_summary_matches(matches: list[commands.Selection], *, xps_only: bool) -> None:
-    print(f"found {len(matches)} xp(s)")
-    for match in matches:
-        xp = match.experiment
-        print()
-        print(f"xp: {xp.signature}")
-        print(f"path: {xp.path}")
-        if not xps_only:
-            runs = match.runs or []
-            print(f"runs: {len(runs)}")
-            for run in runs:
-                status = "done" if run.finished_on else "running"
-                metrics_str = f"  {run.metrics}" if run.metrics else ""
-                print(f"  - {run.signature}  [{status}]{metrics_str}")
-                print(f"    path: {run.path}")
-
-
-def _print_purge_targets(targets: list[commands.Selection]) -> None:
-    for target in targets:
-        xp = target.experiment
-        print()
-        runs = target.runs or []
-        marker = "xp" if target.runs is None else "xp runs"
-        print(f"{marker}: {xp.signature}")
-        print(f"path: {xp.path}")
-        print(f"runs: {len(runs)}")
-        for run in runs:
-            print(f"  - {run.signature}")
-            print(f"    path: {run.path}")
-
-
 def _mode_error(args: argparse.Namespace) -> str | None:
     if args.sigs and args.tags:
         return "command accepts one mode at a time"
@@ -250,12 +234,9 @@ def _usage_error(message: str) -> int:
     return 2
 
 
-def _xp_config_yaml(cfg) -> str:
-    data = OmegaConf.to_container(cfg, resolve=True)
-    if isinstance(data, dict):
-        data.pop("runtime", None)
-    return OmegaConf.to_yaml(OmegaConf.create(data), resolve=True).rstrip()
-
+# ---------------------------------------------------------------------------
+# Argument parser
+# ---------------------------------------------------------------------------
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="forge")
@@ -302,8 +283,48 @@ def _build_parser() -> argparse.ArgumentParser:
     metrics_parser.add_argument("--strict", action="store_true")
     metrics_parser.add_argument("-S", "--sigs", action="store_true")
     metrics_parser.add_argument("-T", "--tags", action="store_true")
+    metrics_parser.add_argument("-l", "--long", action="store_true",
+                                help="Show full table with per-key columns, launched, and status")
     metrics_parser.add_argument("patterns", nargs="*")
     metrics_parser.set_defaults(handler=_metrics_command)
+
+    grid_parser = subparsers.add_parser(
+        "grid",
+        help="Launch a grid of experiments and summarise outcomes",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Launch multiple experiments and print an outcome table.\n\n"
+            "Global overrides apply to every run.  Use --run for explicit\n"
+            "per-run overrides and --sweep for cartesian-product sweeps;\n"
+            "both can appear in the same invocation (they do not cross).\n"
+            "All three can also be loaded from a YAML file via --file.\n\n"
+            "YAML file format:\n"
+            "  globals: [key=val, ...]\n"
+            "  direct:\n"
+            "    - [key=val, key=val]\n"
+            "    - [key=val]\n"
+            "  product:\n"
+            "    key1: [v1, v2, v3]\n"
+            "    key2: [vA, vB]"
+        ),
+    )
+    grid_parser.add_argument(
+        "globals", nargs="*",
+        help="Hydra overrides applied to every run",
+    )
+    grid_parser.add_argument(
+        "--run", action="append", nargs="+", dest="direct", metavar="OVERRIDE",
+        help="Overrides for one explicit run (repeatable)",
+    )
+    grid_parser.add_argument(
+        "--sweep", action="append", dest="sweeps", metavar="KEY=V1,V2,...",
+        help="Sweep axis for cartesian product (repeatable)",
+    )
+    grid_parser.add_argument(
+        "--file", dest="grid_file", metavar="YAML",
+        help="YAML file defining globals / direct / product",
+    )
+    grid_parser.set_defaults(handler=_grid_command)
 
     return parser
 
