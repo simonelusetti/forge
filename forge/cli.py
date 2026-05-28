@@ -140,6 +140,39 @@ def _metrics_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _artifact_command(args: argparse.Namespace) -> int:
+    # Last positional is always the artifact glob; everything before it is the
+    # run pattern — same convention as other commands, no special separator needed.
+    *run_patterns, artifact_glob = args.args
+
+    if args.sigs and args.tags:
+        return _usage_error("command accepts one mode at a time")
+    if not args.sigs and not args.tags and any("=" not in p for p in run_patterns):
+        return _usage_error("override mode expects Hydra overrides like key=value")
+
+    results = commands.artifacts(
+        args.package,
+        run_patterns,
+        artifact_glob,
+        mode=_mode(args),
+        config_dir=args.config_dir,
+        config_name=args.config_name,
+        store=ExperimentStore(),
+        strict=getattr(args, "strict", False),
+        all_runs=getattr(args, "all_runs", False),
+    )
+
+    if not results:
+        print("no artifacts found")
+        return 0
+
+    for run, files in results:
+        print(f"\nrun: {run.signature}")
+        for f in files:
+            print(f"  {f.relative_to(run.path)}")
+    return 0
+
+
 def _clean_command(args: argparse.Namespace) -> int:
     store = ExperimentStore()
     targets = commands.failed_runs(store=store)
@@ -311,6 +344,22 @@ def _build_parser() -> argparse.ArgumentParser:
     metrics_parser.add_argument("patterns", nargs="*")
     metrics_parser.set_defaults(handler=_metrics_command)
 
+    artifact_parser = subparsers.add_parser(
+        "artifact",
+        help="List artifact files inside matching run directories",
+    )
+    artifact_parser.add_argument(
+        "args", nargs="+",
+        metavar="PATTERN",
+        help="Optional run-selection patterns followed by an artifact glob "
+             "(last argument is always the artifact glob)",
+    )
+    artifact_parser.add_argument("--strict", action="store_true")
+    artifact_parser.add_argument("-A", "--all-runs", action="store_true")
+    artifact_parser.add_argument("-S", "--sigs", action="store_true")
+    artifact_parser.add_argument("-T", "--tags", action="store_true")
+    artifact_parser.set_defaults(handler=_artifact_command)
+
     clean_parser = subparsers.add_parser("clean", help="Delete all failed runs")
     clean_parser.add_argument("-f", "--force", action="store_true",
                               help="Skip confirmation prompt")
@@ -358,7 +407,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    import argcomplete
     parser = _build_parser()
+    argcomplete.autocomplete(parser)
     args = parser.parse_args(argv)
     return int(args.handler(args))
 

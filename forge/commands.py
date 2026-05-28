@@ -201,6 +201,37 @@ def grid(
     return results
 
 
+def artifacts(
+    package: str | None,
+    run_patterns: list[str],
+    artifact_glob: str,
+    *,
+    mode: str = "overrides",
+    config_dir: str | None = None,
+    config_name: str = "config",
+    store: ExperimentStore | None = None,
+    strict: bool = False,
+    all_runs: bool = False,
+) -> list[tuple]:
+    """Return (run, [Path, ...]) pairs for every file matching *artifact_glob*
+    inside each run directory that matches *run_patterns*.
+
+    Only runs with at least one matching file are included.
+    """
+    matches = select(
+        package, run_patterns,
+        mode=mode, config_dir=config_dir, config_name=config_name,
+        store=store, strict=strict, all_runs=all_runs,
+    )
+    results = []
+    for selection in matches:
+        for run in (selection.runs or []):
+            files = sorted(run.path.glob(artifact_glob))
+            if files:
+                results.append((run, files))
+    return results
+
+
 def failed_runs(*, store: ExperimentStore | None = None) -> list[Selection]:
     """Return one Selection per experiment that has at least one failed run."""
     resolved = store or ExperimentStore()
