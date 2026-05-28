@@ -83,7 +83,7 @@ def build_metrics_table(runs: list[ExperimentRun], *, long: bool = False) -> Pre
         for run in runs:
             cfg = all_cfg[run.signature]
             launched = run.launched_on[:16].replace("T", " ")
-            status = "done" if run.finished_on else "running"
+            status = run.status
             metrics = run.metrics or {}
             table.add_row([
                 run.signature,
@@ -163,7 +163,7 @@ def print_summary_matches(matches: list[Selection], *, xps_only: bool) -> None:
             runs = match.runs or []
             print(f"runs: {len(runs)}")
             for run in runs:
-                status = "done" if run.finished_on else "running"
+                status = run.status
                 metrics_str = f"  {run.metrics}" if run.metrics else ""
                 print(f"  - {run.signature}  [{status}]{metrics_str}")
                 print(f"    path: {run.path}")

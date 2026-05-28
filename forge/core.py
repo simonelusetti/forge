@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from fnmatch import fnmatchcase
@@ -11,6 +12,17 @@ import typing as tp
 import uuid
 
 from omegaconf import DictConfig, OmegaConf
+
+
+def _mark_failed_on_exit(meta_path: Path) -> None:
+    """atexit handler: if the run is still 'running' at process exit, mark it 'failed'."""
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        if meta.get("status") == "running":
+            meta["status"] = "failed"
+            meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True), encoding="utf-8")
+    except Exception:
+        pass  # best-effort; don't let a handler crash obscure the original error
 
 
 @dataclass(frozen=True)
@@ -31,6 +43,7 @@ class ExperimentRun:
     path: Path
     finished_on: str | None = None
     metrics: dict[str, float] | None = None
+    status: str = "running"  # "running" | "done" | "failed"
 
     def push_log(self, values: dict[str, float], *, step: int | None = None) -> None:
         entry: dict[str, tp.Any] = {"t": datetime.now(timezone.utc).isoformat(), "values": values}
@@ -43,6 +56,7 @@ class ExperimentRun:
         finished_on = datetime.now(timezone.utc).isoformat()
         meta = json.loads((self.path / "meta.json").read_text(encoding="utf-8"))
         meta["finished_on"] = finished_on
+        meta["status"] = "done"
         (self.path / "meta.json").write_text(
             json.dumps(meta, indent=2, sort_keys=True), encoding="utf-8"
         )
@@ -50,7 +64,7 @@ class ExperimentRun:
             (self.path / "metrics.json").write_text(
                 json.dumps(metrics, indent=2, sort_keys=True), encoding="utf-8"
             )
-        return replace(self, finished_on=finished_on, metrics=metrics)
+        return replace(self, finished_on=finished_on, metrics=metrics, status="done")
 
 
 def _flatten_config(cfg: DictConfig) -> list[tuple[str, tp.Any]]:
@@ -169,10 +183,12 @@ class ExperimentStore:
 
         OmegaConf.save(experiment.config, self._experiment_config_file(experiment.signature))
         OmegaConf.save(runtime_cfg, self._runtime_file(experiment.signature, run_signature))
-        self._meta_file(experiment.signature, run_signature).write_text(
-            json.dumps({"launched_on": launched_on, "finished_on": None}, indent=2),
+        meta_path = self._meta_file(experiment.signature, run_signature)
+        meta_path.write_text(
+            json.dumps({"launched_on": launched_on, "finished_on": None, "status": "running"}, indent=2),
             encoding="utf-8",
         )
+        atexit.register(_mark_failed_on_exit, meta_path)
 
         if activate_run_dir:
             os.chdir(run_dir)
@@ -184,6 +200,7 @@ class ExperimentStore:
             launched_on=launched_on,
             config=runtime_cfg,
             path=run_dir.resolve(),
+            status="running",
         )
 
         if verbose:
@@ -217,6 +234,9 @@ class ExperimentStore:
             path=self._exp_dir(signature).resolve(),
         )
 
+        # Backward compat: old meta.json files have no "status" field.
+        status = meta.get("status") or ("done" if meta.get("finished_on") else "running")
+
         return ExperimentRun(
             experiment=experiment,
             signature=f"{signature}/{run_signature}",
@@ -226,6 +246,7 @@ class ExperimentStore:
             config=runtime_config,
             path=run_dir.resolve(),
             metrics=metrics,
+            status=status,
         )
 
 

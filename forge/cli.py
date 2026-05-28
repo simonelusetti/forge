@@ -140,6 +140,29 @@ def _metrics_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _clean_command(args: argparse.Namespace) -> int:
+    store = ExperimentStore()
+    targets = commands.failed_runs(store=store)
+
+    if not targets:
+        print("no failed runs found")
+        return 0
+
+    print("the following failed runs will be deleted:")
+    print_purge_targets(targets)
+
+    if not args.force:
+        answer = input("delete these runs? [y/N] ")
+        if answer.lower() not in {"y", "yes"}:
+            print("aborted")
+            return 1
+
+    n = sum(len(t.runs) for t in targets if t.runs)
+    commands.purge(targets)
+    print(f"deleted {n} failed run(s)")
+    return 0
+
+
 def _grid_command(args: argparse.Namespace) -> int:
     global_overrides: list[str] = list(args.globals or [])
     direct: list[list[str]] = [list(r) for r in (args.direct or [])]
@@ -287,6 +310,11 @@ def _build_parser() -> argparse.ArgumentParser:
                                 help="Show full table with per-key columns, launched, and status")
     metrics_parser.add_argument("patterns", nargs="*")
     metrics_parser.set_defaults(handler=_metrics_command)
+
+    clean_parser = subparsers.add_parser("clean", help="Delete all failed runs")
+    clean_parser.add_argument("-f", "--force", action="store_true",
+                              help="Skip confirmation prompt")
+    clean_parser.set_defaults(handler=_clean_command)
 
     grid_parser = subparsers.add_parser(
         "grid",

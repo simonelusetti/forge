@@ -201,6 +201,19 @@ def grid(
     return results
 
 
+def failed_runs(*, store: ExperimentStore | None = None) -> list[Selection]:
+    """Return one Selection per experiment that has at least one failed run."""
+    resolved = store or ExperimentStore()
+    by_xp: dict[str, tuple] = {}
+    for run in resolved.list_runs():
+        if run.status == "failed":
+            sig = run.experiment.signature
+            if sig not in by_xp:
+                by_xp[sig] = (run.experiment, [])
+            by_xp[sig][1].append(run)
+    return [Selection(xp, runs) for xp, runs in by_xp.values()]
+
+
 def purge(targets: list[Selection]) -> None:
     for target in targets:
         if target.runs is None:
@@ -208,6 +221,9 @@ def purge(targets: list[Selection]) -> None:
         else:
             for run in target.runs:
                 shutil.rmtree(run.path)
+            xp_path = target.experiment.path
+            if xp_path.exists() and not any(p.is_dir() for p in xp_path.iterdir()):
+                shutil.rmtree(xp_path)
 
 
 def store_targets(targets: list[Selection], *, root: Path | str | None = None) -> Path:
