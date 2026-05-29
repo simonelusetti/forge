@@ -44,6 +44,27 @@ class ExperimentRun:
     finished_on: str | None = None
     metrics: dict[str, float] | None = None
     status: str = "running"  # "running" | "done" | "failed"
+    project_dir: Path | None = None  # cwd at launch time, before chdir into run dir
+
+    def resolve(self, path: str | Path) -> Path:
+        """Return *path* as an absolute Path.
+
+        Relative paths are resolved against the project directory captured at
+        launch time (i.e. the directory forge was called from, before it
+        changed into the run output directory).  Absolute paths pass through
+        unchanged.  Raises ``RuntimeError`` if the project directory is
+        unknown (e.g. the run was loaded from a store created by an older
+        version of forge).
+        """
+        p = Path(path)
+        if p.is_absolute():
+            return p
+        if self.project_dir is None:
+            raise RuntimeError(
+                "project_dir is not set on this run — it may have been created "
+                "by an older version of forge.  Pass an absolute path instead."
+            )
+        return (self.project_dir / p).resolve()
 
     def push_log(self, values: dict[str, float], *, step: int | None = None) -> None:
         entry: dict[str, tp.Any] = {"t": datetime.now(timezone.utc).isoformat(), "values": values}
@@ -172,10 +193,12 @@ class ExperimentStore:
         runtime_config: DictConfig | tp.Mapping[str, tp.Any] | None = None,
         activate_run_dir: bool = True,
         verbose: bool = True,
+        project_dir: Path | None = None,
     ) -> ExperimentRun:
         run_signature = run_signature or str(uuid.uuid4())[:8]
         run_dir = self._run_dir(experiment.signature, run_signature)
         run_dir.mkdir(parents=True, exist_ok=True)
+        run_dir = run_dir.resolve()  # resolve before any chdir so path is always absolute
         launched_on = datetime.now(timezone.utc).isoformat()
         full_signature = f"{experiment.signature}/{run_signature}"
         run_tags = _str_list(tags) if tags is not None else list(experiment.tags)
@@ -183,9 +206,14 @@ class ExperimentStore:
 
         OmegaConf.save(experiment.config, self._experiment_config_file(experiment.signature))
         OmegaConf.save(runtime_cfg, self._runtime_file(experiment.signature, run_signature))
-        meta_path = self._meta_file(experiment.signature, run_signature)
+        meta_path = self._meta_file(experiment.signature, run_signature).resolve()
         meta_path.write_text(
-            json.dumps({"launched_on": launched_on, "finished_on": None, "status": "running"}, indent=2),
+            json.dumps({
+                "launched_on": launched_on,
+                "finished_on": None,
+                "status": "running",
+                "project_dir": str(project_dir) if project_dir else None,
+            }, indent=2, sort_keys=True),
             encoding="utf-8",
         )
         atexit.register(_mark_failed_on_exit, meta_path)
@@ -199,8 +227,9 @@ class ExperimentStore:
             tags=run_tags,
             launched_on=launched_on,
             config=runtime_cfg,
-            path=run_dir.resolve(),
+            path=run_dir,
             status="running",
+            project_dir=project_dir,
         )
 
         if verbose:
@@ -234,8 +263,10 @@ class ExperimentStore:
             path=self._exp_dir(signature).resolve(),
         )
 
-        # Backward compat: old meta.json files have no "status" field.
+        # Backward compat: old meta.json files may lack "status" or "project_dir".
         status = meta.get("status") or ("done" if meta.get("finished_on") else "running")
+        raw_project_dir = meta.get("project_dir")
+        project_dir = Path(raw_project_dir) if raw_project_dir else None
 
         return ExperimentRun(
             experiment=experiment,
@@ -247,6 +278,7 @@ class ExperimentStore:
             path=run_dir.resolve(),
             metrics=metrics,
             status=status,
+            project_dir=project_dir,
         )
 
 
@@ -263,4 +295,7 @@ def start_run(
 
     experiment = resolved_store.create_experiment(cfg, exclude=exclude)
     runtime_cfg = _as_cfg(OmegaConf.select(cfg, "runtime", default={}))
-    return resolved_store.register_run(experiment, runtime_config=runtime_cfg, verbose=verbose)
+    project_dir = Path.cwd().resolve()  # capture before register_run chdirs into the run dir
+    return resolved_store.register_run(
+        experiment, runtime_config=runtime_cfg, verbose=verbose, project_dir=project_dir
+    )
