@@ -1,19 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import importlib.util
 from pathlib import Path
+import re
 
 from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig, OmegaConf
 
-from .core import Experiment, ExperimentRun, ExperimentStore, canonical_config, forge_exclude
+from .core import Experiment, ExperimentRun, ExperimentStore, Selection, canonical_config, forge_exclude
 
-
-@dataclass(frozen=True)
-class Selection:
-    experiment: Experiment
-    runs: list[ExperimentRun] | None
 
 
 
@@ -50,10 +45,26 @@ def compose_cfg(
 
 
 
+_SIG_RE = re.compile(r"^[0-9a-f]+(/[0-9a-f]+)?$", re.IGNORECASE)
+
+
+def detect_mode(patterns: list[str]) -> str:
+    """Infer matching mode from *patterns*.
+
+    - Any pattern containing ``=``  → ``"overrides"``
+    - All patterns look like hex signatures → ``"sigs"``
+    - Otherwise → ``"tags"``
+    """
+    if not patterns or any("=" in p for p in patterns):
+        return "overrides"
+    if all(_SIG_RE.match(p) for p in patterns):
+        return "sigs"
+    return "tags"
+
+
 def query(
     patterns: list[str],
     *,
-    mode: str = "overrides",
     package: str | None = None,
     config_dir: str | None = None,
     config_name: str = "config",
@@ -62,14 +73,8 @@ def query(
     all_runs: bool = False,
     whole_xps: bool = False,
 ) -> list[Selection]:
-    """Return matching selections for *patterns* using the given *mode*.
-
-    Modes:
-    - ``"overrides"``: Hydra override strings, matched against stored configs
-    - ``"sigs"``:      partial experiment/run signature strings
-    - ``"tags"``:      tag name strings
-    """
     resolved_store = store or ExperimentStore()
+    mode = detect_mode(patterns)
     if mode == "sigs":
         matches = select_signatures(patterns, store=resolved_store, all_runs=all_runs)
     elif mode == "tags":
@@ -96,7 +101,7 @@ def config_matches(
         base_items = dict(canonical_config(base_cfg, exclude))
         constraints = [(k, v) for k, v in canonical_config(target_cfg, exclude) if base_items.get(k) != v]
     return [
-        match for match in _all_matches(store)
+        match for match in (store or ExperimentStore()).all_selections()
         if all(OmegaConf.select(match.experiment.config, k) == v for k, v in constraints)
     ]
 
@@ -107,11 +112,9 @@ def tag_matches(
     store: ExperimentStore | None = None,
     strict: bool = False,
 ) -> list[Selection]:
-    if not tags:
-        return [] if strict else _all_matches(store)
     check = all if strict else any
     selected = []
-    for match in _all_matches(store):
+    for match in (store or ExperimentStore()).all_selections():
         xp_matches = check(tag in match.experiment.tags for tag in tags)
         runs = [run for run in match.runs or [] if xp_matches or check(tag in run.tags for tag in tags)]
         if xp_matches or runs:
@@ -129,7 +132,7 @@ def select_signatures(
     store: ExperimentStore | None = None,
     all_runs: bool = False,
 ) -> list[Selection]:
-    all_matches = _all_matches(store)
+    all_matches = (store or ExperimentStore()).all_selections()
     selected: dict[str, tuple[Experiment, list[ExperimentRun] | None]] = {}
     for signature in signatures:
         for match in all_matches:
@@ -148,15 +151,5 @@ def select_signatures(
                             seen = {r.signature for r in existing}
                             selected[xp.signature] = (xp, [*existing, *(r for r in runs if r.signature not in seen)])
     return [Selection(xp, runs) for xp, runs in selected.values()]
-
-
-def _all_matches(store: ExperimentStore | None = None) -> list[Selection]:
-    experiments: dict[str, Experiment] = {}
-    runs: dict[str, list[ExperimentRun]] = {}
-    for run in (store or ExperimentStore()).list_runs():
-        signature = run.experiment.signature
-        experiments[signature] = run.experiment
-        runs.setdefault(signature, []).append(run)
-    return [Selection(experiment, runs[signature]) for signature, experiment in experiments.items()]
 
 

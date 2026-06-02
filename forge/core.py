@@ -66,6 +66,12 @@ class ExperimentRun:
         return replace(self, finished_on=finished_on, metrics=metrics, status="done")
 
 
+@dataclass(frozen=True)
+class Selection:
+    experiment: Experiment
+    runs: list[ExperimentRun] | None
+
+
 def flatten_config(cfg: DictConfig) -> list[tuple[str, tp.Any]]:
     container = OmegaConf.to_container(cfg, resolve=True)
 
@@ -153,6 +159,15 @@ class ExperimentStore:
             print(f"run: {run.signature}  tags={run.tags}  launched={run.launched_on}")
 
         return run
+
+    def all_selections(self) -> list[Selection]:
+        experiments: dict[str, Experiment] = {}
+        runs: dict[str, list[ExperimentRun]] = {}
+        for run in self.list_runs():
+            sig = run.experiment.signature
+            experiments[sig] = run.experiment
+            runs.setdefault(sig, []).append(run)
+        return [Selection(exp, runs[sig]) for sig, exp in experiments.items()]
 
     def list_runs(self, signature: str | None = None) -> list[ExperimentRun]:
         if not self.xps_dir.exists():

@@ -2,13 +2,14 @@ from .core import (
     Experiment,
     ExperimentRun,
     ExperimentStore,
+    Selection,
     canonical_config,
     canonical_signature,
     flatten_config,
     forge_exclude,
     start_run,
 )
-from .matching import Selection, compose_cfg, query
+from .matching import compose_cfg, query
 from .commands import GridRun, artifacts, failed_runs, grid, purge, run, store_targets
 
 __all__ = [

@@ -9,7 +9,7 @@ import yaml
 
 from . import commands
 from .core import ExperimentRun, ExperimentStore
-from .matching import query
+from .matching import detect_mode, query
 from .display import (
     build_grid_table,
     build_metrics_table,
@@ -31,26 +31,12 @@ def _run_command(args: argparse.Namespace) -> int:
 
 
 def _info_command(args: argparse.Namespace) -> int:
-    mode_error = _mode_error(args)
-    if mode_error:
-        return _usage_error(mode_error)
-
-    sigs_or_tags = args.sigs or args.tags
-    if args.sigs:
-        if args.sigs_only or args.xps_only or args.strict:
-            return _usage_error("signature info does not support --sigs-only, --xps-only, or --strict")
-
-    if args.tags:
-        if args.sigs_only or args.xps_only or args.all_runs:
-            return _usage_error("tag info does not support --sigs-only, --xps-only, or --all-runs")
-
     matches = _query(args)
-
     if not matches:
         print("no xp found")
         return 0
 
-    if sigs_or_tags:
+    if detect_mode(args.patterns) != "overrides":
         return print_config_matches(matches)
 
     if args.sigs_only:
@@ -66,13 +52,6 @@ def _info_command(args: argparse.Namespace) -> int:
 
 
 def _purge_command(args: argparse.Namespace) -> int:
-    mode_error = _mode_error(args)
-    if mode_error:
-        return _usage_error(mode_error)
-
-    if args.sigs_only or args.xps_only:
-        return _usage_error("purge does not support --sigs-only or --xps-only")
-
     targets = _query(args, whole_xps=True)
 
     if not targets:
@@ -94,10 +73,6 @@ def _purge_command(args: argparse.Namespace) -> int:
 
 
 def _store_command(args: argparse.Namespace) -> int:
-    mode_error = _mode_error(args)
-    if mode_error:
-        return _usage_error(mode_error)
-
     targets = _query(args, whole_xps=True)
 
     if not targets:
@@ -110,11 +85,6 @@ def _store_command(args: argparse.Namespace) -> int:
 
 
 def _metrics_command(args: argparse.Namespace) -> int:
-    if args.sigs and args.tags:
-        return _usage_error("command accepts one mode at a time")
-    if not args.sigs and not args.tags and any("=" not in p for p in args.patterns):
-        return _usage_error("override mode expects Hydra overrides like key=value")
-
     matches = _query(args)
     if not matches:
         print("no xp found")
@@ -141,14 +111,8 @@ def _artifact_command(args: argparse.Namespace) -> int:
     # run pattern — same convention as other commands, no special separator needed.
     *run_patterns, artifact_glob = args.args
 
-    if args.sigs and args.tags:
-        return _usage_error("command accepts one mode at a time")
-    if not args.sigs and not args.tags and any("=" not in p for p in run_patterns):
-        return _usage_error("override mode expects Hydra overrides like key=value")
-
     selections = query(
         run_patterns,
-        mode="sigs" if args.sigs else "tags" if args.tags else "overrides",
         package=args.package,
         config_dir=args.config_dir,
         config_name=args.config_name,
@@ -247,7 +211,6 @@ def _grid_command(args: argparse.Namespace) -> int:
 def _query(args: argparse.Namespace, *, whole_xps: bool = False) -> list[commands.Selection]:
     return query(
         args.patterns,
-        mode="sigs" if args.sigs else "tags" if args.tags else "overrides",
         package=args.package,
         config_dir=args.config_dir,
         config_name=args.config_name,
@@ -256,17 +219,6 @@ def _query(args: argparse.Namespace, *, whole_xps: bool = False) -> list[command
         all_runs=getattr(args, "all_runs", False),
         whole_xps=whole_xps,
     )
-
-
-def _mode_error(args: argparse.Namespace) -> str | None:
-    if args.sigs and args.tags:
-        return "command accepts one mode at a time"
-    if not args.sigs and any("=" not in arg for arg in args.patterns):
-        if not args.tags:
-            return "override mode expects Hydra overrides like key=value"
-    if not args.sigs and args.all_runs:
-        return "--all-runs is only supported with signature mode"
-    return None
 
 
 def _usage_error(message: str) -> int:
@@ -292,18 +244,12 @@ def _build_parser() -> argparse.ArgumentParser:
     info_parser.add_argument("--xps-only", action="store_true")
     info_parser.add_argument("--strict", action="store_true")
     info_parser.add_argument("-A", "--all-runs", action="store_true")
-    info_parser.add_argument("-S", "--sigs", action="store_true")
-    info_parser.add_argument("-T", "--tags", action="store_true")
     info_parser.add_argument("patterns", nargs="*")
     info_parser.set_defaults(handler=_info_command)
 
     purge_parser = subparsers.add_parser("purge")
-    purge_parser.add_argument("--sigs-only", action="store_true", help=argparse.SUPPRESS)
-    purge_parser.add_argument("--xps-only", action="store_true", help=argparse.SUPPRESS)
     purge_parser.add_argument("--strict", action="store_true")
     purge_parser.add_argument("-A", "--all-runs", action="store_true")
-    purge_parser.add_argument("-S", "--sigs", action="store_true")
-    purge_parser.add_argument("-T", "--tags", action="store_true")
     purge_parser.add_argument("-f", "--force", action="store_true")
     purge_parser.add_argument("patterns", nargs="*")
     purge_parser.set_defaults(handler=_purge_command)
@@ -311,15 +257,11 @@ def _build_parser() -> argparse.ArgumentParser:
     store_parser = subparsers.add_parser("store")
     store_parser.add_argument("--strict", action="store_true")
     store_parser.add_argument("-A", "--all-runs", action="store_true")
-    store_parser.add_argument("-S", "--sigs", action="store_true")
-    store_parser.add_argument("-T", "--tags", action="store_true")
     store_parser.add_argument("patterns", nargs="*")
     store_parser.set_defaults(handler=_store_command)
 
     metrics_parser = subparsers.add_parser("metrics")
     metrics_parser.add_argument("--strict", action="store_true")
-    metrics_parser.add_argument("-S", "--sigs", action="store_true")
-    metrics_parser.add_argument("-T", "--tags", action="store_true")
     metrics_parser.add_argument("-l", "--long", action="store_true",
                                 help="Show full table with per-key columns, launched, and status")
     metrics_parser.add_argument("patterns", nargs="*")
@@ -337,8 +279,6 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     artifact_parser.add_argument("--strict", action="store_true")
     artifact_parser.add_argument("-A", "--all-runs", action="store_true")
-    artifact_parser.add_argument("-S", "--sigs", action="store_true")
-    artifact_parser.add_argument("-T", "--tags", action="store_true")
     artifact_parser.set_defaults(handler=_artifact_command)
 
     clean_parser = subparsers.add_parser("clean", help="Delete all failed runs")
