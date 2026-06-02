@@ -3,7 +3,6 @@ from __future__ import annotations
 import atexit
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from fnmatch import fnmatchcase
 from hashlib import sha1
 import json
 import os
@@ -44,27 +43,6 @@ class ExperimentRun:
     finished_on: str | None = None
     metrics: dict[str, float] | None = None
     status: str = "running"  # "running" | "done" | "failed"
-    project_dir: Path | None = None  # cwd at launch time, before chdir into run dir
-
-    def resolve(self, path: str | Path) -> Path:
-        """Return *path* as an absolute Path.
-
-        Relative paths are resolved against the project directory captured at
-        launch time (i.e. the directory forge was called from, before it
-        changed into the run output directory).  Absolute paths pass through
-        unchanged.  Raises ``RuntimeError`` if the project directory is
-        unknown (e.g. the run was loaded from a store created by an older
-        version of forge).
-        """
-        p = Path(path)
-        if p.is_absolute():
-            return p
-        if self.project_dir is None:
-            raise RuntimeError(
-                "project_dir is not set on this run — it may have been created "
-                "by an older version of forge.  Pass an absolute path instead."
-            )
-        return (self.project_dir / p).resolve()
 
     def push_log(self, values: dict[str, float], *, step: int | None = None) -> None:
         entry: dict[str, tp.Any] = {"t": datetime.now(timezone.utc).isoformat(), "values": values}
@@ -88,7 +66,7 @@ class ExperimentRun:
         return replace(self, finished_on=finished_on, metrics=metrics, status="done")
 
 
-def _flatten_config(cfg: DictConfig) -> list[tuple[str, tp.Any]]:
+def flatten_config(cfg: DictConfig) -> list[tuple[str, tp.Any]]:
     container = OmegaConf.to_container(cfg, resolve=True)
 
     def _walk(obj: tp.Any, prefix: str = "") -> tp.Iterator[tuple[str, tp.Any]]:
@@ -106,50 +84,28 @@ def _flatten_config(cfg: DictConfig) -> list[tuple[str, tp.Any]]:
     return list(_walk(container)) if isinstance(container, (dict, list)) else []
 
 
-def _matches_key(key: str, pattern: str) -> bool:
-    if pattern.startswith("!"):
-        return not _matches_key(key, pattern[1:])
-    if pattern.endswith(".*"):
-        return key.startswith(pattern[:-2] + ".")
-    return fnmatchcase(key, pattern)
+def forge_exclude(cfg: DictConfig) -> set[str]:
+    """Return the set of config keys to exclude for experiment identity."""
+    forge = OmegaConf.select(cfg, "forge")
+    base = OmegaConf.create(
+        {"forge": OmegaConf.to_container(forge, resolve=True)} if forge else {}
+    )
+    for key in list(OmegaConf.select(cfg, "forge.exclude", default=[])):
+        OmegaConf.update(base, key, None, merge=True)
+    return {k for k, _ in flatten_config(base)}
 
 
-def config_items(cfg: DictConfig, exclude: tp.Sequence[str]) -> list[tuple[str, tp.Any]]:
-    return [
-        (key, value)
-        for key, value in _flatten_config(cfg)
-        if key != "run" and not any(_matches_key(key, pattern) for pattern in exclude)
-    ]
+def canonical_config(cfg: DictConfig, exclude: set[str] | None = None) -> list[tuple[str, tp.Any]]:
+    """Flatten *cfg* and remove any keys present in *exclude*."""
+    items = [(k, v) for k, v in flatten_config(cfg) if k != "run"]
+    return [(k, v) for k, v in items if k not in exclude] if exclude else items
 
 
-def canonical_signature(cfg: DictConfig, exclude: tp.Sequence[str]) -> str:
-    items = config_items(cfg, exclude)
-    canonical_str = json.dumps(items, sort_keys=True, default=str)
-    return sha1(canonical_str.encode()).hexdigest()[:8]
+def canonical_signature(cfg: DictConfig) -> str:
+    return sha1(
+        json.dumps(canonical_config(cfg, forge_exclude(cfg)), sort_keys=True, default=str).encode()
+    ).hexdigest()[:8]
 
-
-def _str_list(value: tp.Any) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, (str, bytes)):
-        return [str(value)]
-    if isinstance(value, tp.Sequence):
-        return [str(item) for item in value]
-    return []
-
-
-def _as_cfg(value: DictConfig | tp.Mapping[str, tp.Any] | None) -> DictConfig:
-    if OmegaConf.is_config(value):
-        return tp.cast(DictConfig, value)
-    return OmegaConf.create(value or {})
-
-
-def _print_run_summary(experiment: Experiment, run: ExperimentRun) -> None:
-    print(f"experiment signature: {experiment.signature}")
-    print(f"experiment tags: {experiment.tags}")
-    print(f"\nrun signature: {run.signature}")
-    print(f"run tags: {run.tags}")
-    print(f"launched_on: {run.launched_on}")
 
 
 class ExperimentStore:
@@ -157,145 +113,87 @@ class ExperimentStore:
         self.root = Path(root) if root is not None else Path.cwd() / "outputs"
         self.xps_dir = self.root / "xps"
 
-    def _exp_dir(self, signature: str) -> Path:
-        return self.xps_dir / signature
+    def start_run(self, cfg: DictConfig, *, verbose: bool = True) -> ExperimentRun:
+        signature = canonical_signature(cfg)
+        tags = list(OmegaConf.select(cfg, "forge.tags", default=[]))
+        runtime_cfg = OmegaConf.select(cfg, "runtime") or OmegaConf.create({})
 
-    def _run_dir(self, signature: str, run_signature: str) -> Path:
-        return self._exp_dir(signature) / run_signature
-
-    def _experiment_config_file(self, signature: str) -> Path:
-        return self._exp_dir(signature) / "config.yaml"
-
-    def _runtime_file(self, signature: str, run_signature: str) -> Path:
-        return self._run_dir(signature, run_signature) / "runtime.yaml"
-
-    def _meta_file(self, signature: str, run_signature: str) -> Path:
-        return self._run_dir(signature, run_signature) / "meta.json"
-
-    def create_experiment(
-        self,
-        cfg: DictConfig,
-        *,
-        exclude: tp.Sequence[str] = (),
-    ) -> Experiment:
-        signature = canonical_signature(cfg, exclude)
-        tags = _str_list(OmegaConf.select(cfg, "forge.tags", default=[]))
-        exp_dir = self._exp_dir(signature)
+        exp_dir = (self.xps_dir / signature).resolve()
         exp_dir.mkdir(parents=True, exist_ok=True)
-        return Experiment(signature=signature, tags=tags, config=cfg, path=exp_dir.resolve())
 
-    def register_run(
-        self,
-        experiment: Experiment,
-        *,
-        run_signature: str | None = None,
-        tags: tp.Sequence[str] | None = None,
-        runtime_config: DictConfig | tp.Mapping[str, tp.Any] | None = None,
-        activate_run_dir: bool = True,
-        verbose: bool = True,
-        project_dir: Path | None = None,
-    ) -> ExperimentRun:
-        run_signature = run_signature or str(uuid.uuid4())[:8]
-        run_dir = self._run_dir(experiment.signature, run_signature)
+        run_signature = str(uuid.uuid4())[:8]
+        run_dir = (exp_dir / run_signature).resolve()
         run_dir.mkdir(parents=True, exist_ok=True)
-        run_dir = run_dir.resolve()  # resolve before any chdir so path is always absolute
         launched_on = datetime.now(timezone.utc).isoformat()
-        full_signature = f"{experiment.signature}/{run_signature}"
-        run_tags = _str_list(tags) if tags is not None else list(experiment.tags)
-        runtime_cfg = _as_cfg(runtime_config)
 
-        OmegaConf.save(experiment.config, self._experiment_config_file(experiment.signature))
-        OmegaConf.save(runtime_cfg, self._runtime_file(experiment.signature, run_signature))
-        meta_path = self._meta_file(experiment.signature, run_signature).resolve()
+        OmegaConf.save(cfg, exp_dir / "config.yaml")
+        OmegaConf.save(runtime_cfg, run_dir / "runtime.yaml")
+        meta_path = run_dir / "meta.json"
         meta_path.write_text(
-            json.dumps({
-                "launched_on": launched_on,
-                "finished_on": None,
-                "status": "running",
-                "project_dir": str(project_dir) if project_dir else None,
-            }, indent=2, sort_keys=True),
+            json.dumps({"launched_on": launched_on, "finished_on": None, "status": "running"},
+                       indent=2, sort_keys=True),
             encoding="utf-8",
         )
         atexit.register(_mark_failed_on_exit, meta_path)
+        os.chdir(run_dir)
 
-        if activate_run_dir:
-            os.chdir(run_dir)
-
+        experiment = Experiment(signature=signature, tags=tags, config=cfg, path=exp_dir)
         run = ExperimentRun(
             experiment=experiment,
-            signature=full_signature,
-            tags=run_tags,
+            signature=f"{signature}/{run_signature}",
+            tags=tags,
             launched_on=launched_on,
             config=runtime_cfg,
             path=run_dir,
             status="running",
-            project_dir=project_dir,
         )
 
         if verbose:
-            _print_run_summary(experiment, run)
+            print(f"experiment: {experiment.signature}  tags={experiment.tags}")
+            print(f"run: {run.signature}  tags={run.tags}  launched={run.launched_on}")
 
         return run
 
     def list_runs(self, signature: str | None = None) -> list[ExperimentRun]:
         if not self.xps_dir.exists():
             return []
-
         pattern = f"{signature}/*/meta.json" if signature else "*/*/meta.json"
-        runs = []
-        for meta_path in sorted(self.xps_dir.glob(pattern)):
-            rel = meta_path.relative_to(self.xps_dir)
-            runs.append(self.load_run(rel.parts[0], rel.parts[1]))
-        return runs
+        return [
+            self.load_run(*p.relative_to(self.xps_dir).parts[:2])
+            for p in sorted(self.xps_dir.glob(pattern))
+        ]
 
     def load_run(self, signature: str, run_signature: str) -> ExperimentRun:
-        run_dir = self._run_dir(signature, run_signature)
-        meta = json.loads(self._meta_file(signature, run_signature).read_text(encoding="utf-8"))
-        experiment_config = OmegaConf.load(self._experiment_config_file(signature))
-        runtime_config = OmegaConf.load(self._runtime_file(signature, run_signature))
+        exp_dir = (self.xps_dir / signature).resolve()
+        run_dir = (exp_dir / run_signature).resolve()
+
+        meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
+        experiment_config = OmegaConf.load(exp_dir / "config.yaml")
+        runtime_config = OmegaConf.load(run_dir / "runtime.yaml")
         metrics_file = run_dir / "metrics.json"
         metrics = json.loads(metrics_file.read_text(encoding="utf-8")) if metrics_file.exists() else None
 
         experiment = Experiment(
             signature=signature,
-            tags=_str_list(experiment_config.get("forge", {}).get("tags")),
+            tags=list(OmegaConf.select(experiment_config, "forge.tags", default=[]) or []),
             config=experiment_config,
-            path=self._exp_dir(signature).resolve(),
+            path=exp_dir,
         )
-
-        # Backward compat: old meta.json files may lack "status" or "project_dir".
-        status = meta.get("status") or ("done" if meta.get("finished_on") else "running")
-        raw_project_dir = meta.get("project_dir")
-        project_dir = Path(raw_project_dir) if raw_project_dir else None
-
+        
         return ExperimentRun(
             experiment=experiment,
             signature=f"{signature}/{run_signature}",
             tags=experiment.tags,
             launched_on=meta["launched_on"],
-            finished_on=meta.get("finished_on"),
+            finished_on=meta["finished_on"],
             config=runtime_config,
-            path=run_dir.resolve(),
+            path=run_dir,
             metrics=metrics,
-            status=status,
-            project_dir=project_dir,
+            status=meta["status"],
         )
 
 
-def start_run(
-    cfg: DictConfig,
-    *,
-    store: ExperimentStore | None = None,
-) -> ExperimentRun:
+def start_run(cfg: DictConfig, *, store: ExperimentStore | None = None) -> ExperimentRun:
     store_root = OmegaConf.select(cfg, "forge.store", default=None)
-    resolved_store = store or ExperimentStore(root=store_root)
-    exclude_list = _str_list(OmegaConf.select(cfg, "forge.exclude", default=[]))
-    exclude = ("forge.*", *exclude_list)
     verbose = bool(OmegaConf.select(cfg, "forge.verbose", default=True))
-
-    experiment = resolved_store.create_experiment(cfg, exclude=exclude)
-    runtime_cfg = _as_cfg(OmegaConf.select(cfg, "runtime", default={}))
-    project_dir = Path.cwd().resolve()  # capture before register_run chdirs into the run dir
-    return resolved_store.register_run(
-        experiment, runtime_config=runtime_cfg, verbose=verbose, project_dir=project_dir
-    )
+    return (store or ExperimentStore(root=store_root)).start_run(cfg, verbose=verbose)

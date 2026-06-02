@@ -7,12 +7,9 @@ from omegaconf import OmegaConf
 from prettytable import PrettyTable
 
 from .commands import GridRun, Selection
-from .core import ExperimentRun, config_items
+from .core import ExperimentRun, canonical_config, flatten_config
 
 
-# ---------------------------------------------------------------------------
-# Config / override formatting
-# ---------------------------------------------------------------------------
 
 def parse_overrides(overrides: list[str]) -> dict[str, str]:
     """Parse a list of Hydra override strings into a plain key→value dict."""
@@ -57,9 +54,6 @@ def xp_config_yaml(cfg) -> str:
     return OmegaConf.to_yaml(OmegaConf.create(data), resolve=True).rstrip()
 
 
-# ---------------------------------------------------------------------------
-# Table builders
-# ---------------------------------------------------------------------------
 
 def build_metrics_table(runs: list[ExperimentRun], *, long: bool = False) -> PrettyTable:
     """Build a PrettyTable summarising *runs* and their metrics.
@@ -68,10 +62,11 @@ def build_metrics_table(runs: list[ExperimentRun], *, long: bool = False) -> Pre
     ``overrides`` column using :func:`short_config_str`.  Pass ``long=True``
     for the full breakdown with one column per key plus launched/status.
     """
-    all_cfg = {
-        run.signature: dict(config_items(run.experiment.config, ("forge.*", "runtime.*")))
-        for run in runs
-    }
+    all_cfg = {}
+    for run in runs:
+        cfg = run.experiment.config
+        exclude = {k for k, _ in flatten_config(cfg) if k.startswith(("forge.", "runtime."))}
+        all_cfg[run.signature] = dict(canonical_config(cfg, exclude or None))
     all_keys = sorted({k for items in all_cfg.values() for k in items})
     varying = [k for k in all_keys if len({str(items.get(k)) for items in all_cfg.values()}) > 1]
 
@@ -122,9 +117,6 @@ def build_grid_table(results: list[GridRun]) -> PrettyTable:
     return table
 
 
-# ---------------------------------------------------------------------------
-# Text printers
-# ---------------------------------------------------------------------------
 
 def print_config_matches(matches: list[Selection]) -> int:
     if not matches:

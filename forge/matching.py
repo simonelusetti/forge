@@ -1,17 +1,85 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import typing as tp
+import importlib.util
+from pathlib import Path
 
+from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig, OmegaConf
 
-from .core import Experiment, ExperimentRun, ExperimentStore, _str_list, config_items
+from .core import Experiment, ExperimentRun, ExperimentStore, canonical_config, forge_exclude
 
 
 @dataclass(frozen=True)
 class Selection:
     experiment: Experiment
     runs: list[ExperimentRun] | None
+
+
+
+def _resolve_config_dir(package: str | None, config_dir: str | None) -> Path:
+    if config_dir:
+        return Path(config_dir)
+    if package:
+        spec = importlib.util.find_spec(package)
+        if spec is None or not spec.submodule_search_locations:
+            raise ModuleNotFoundError(
+                f"Package {package!r} not found. "
+                f"Run from the project directory or pass --config-dir."
+            )
+        return Path(next(iter(spec.submodule_search_locations))) / "conf"
+    cwd_conf = Path.cwd() / "conf"
+    if not cwd_conf.is_dir():
+        raise FileNotFoundError(
+            f"No config directory found. Expected {cwd_conf} to exist, "
+            f"or pass --config-dir / -P <package>."
+        )
+    return cwd_conf
+
+
+def compose_cfg(
+    package: str | None,
+    overrides: list[str],
+    *,
+    config_dir: str | None = None,
+    config_name: str = "config",
+) -> DictConfig:
+    resolved = _resolve_config_dir(package, config_dir)
+    with initialize_config_dir(config_dir=str(resolved.resolve()), version_base=None):
+        return compose(config_name=config_name, overrides=overrides)
+
+
+
+def query(
+    patterns: list[str],
+    *,
+    mode: str = "overrides",
+    package: str | None = None,
+    config_dir: str | None = None,
+    config_name: str = "config",
+    store: ExperimentStore | None = None,
+    strict: bool = False,
+    all_runs: bool = False,
+    whole_xps: bool = False,
+) -> list[Selection]:
+    """Return matching selections for *patterns* using the given *mode*.
+
+    Modes:
+    - ``"overrides"``: Hydra override strings, matched against stored configs
+    - ``"sigs"``:      partial experiment/run signature strings
+    - ``"tags"``:      tag name strings
+    """
+    resolved_store = store or ExperimentStore()
+    if mode == "sigs":
+        matches = select_signatures(patterns, store=resolved_store, all_runs=all_runs)
+    elif mode == "tags":
+        matches = tag_matches(patterns, store=resolved_store, strict=strict)
+    else:
+        base_cfg = compose_cfg(package, [], config_dir=config_dir, config_name=config_name)
+        target_cfg = compose_cfg(package, patterns, config_dir=config_dir, config_name=config_name)
+        matches = config_matches(base_cfg, target_cfg, store=resolved_store, strict=strict)
+    return whole_experiments(matches) if whole_xps else matches
+
 
 
 def config_matches(
@@ -21,9 +89,16 @@ def config_matches(
     store: ExperimentStore | None = None,
     strict: bool = False,
 ) -> list[Selection]:
-    exclude = ("forge.*", *_str_list(OmegaConf.select(target_cfg, "forge.exclude", default=[])))
-    constraints = config_items(target_cfg, exclude) if strict else _changed_items(base_cfg, target_cfg, exclude)
-    return [match for match in _all_matches(store) if _matches_constraints(match.experiment.config, constraints)]
+    exclude = forge_exclude(target_cfg)
+    if strict:
+        constraints = canonical_config(target_cfg, exclude)
+    else:
+        base_items = dict(canonical_config(base_cfg, exclude))
+        constraints = [(k, v) for k, v in canonical_config(target_cfg, exclude) if base_items.get(k) != v]
+    return [
+        match for match in _all_matches(store)
+        if all(OmegaConf.select(match.experiment.config, k) == v for k, v in constraints)
+    ]
 
 
 def tag_matches(
@@ -34,11 +109,11 @@ def tag_matches(
 ) -> list[Selection]:
     if not tags:
         return [] if strict else _all_matches(store)
-
+    check = all if strict else any
     selected = []
     for match in _all_matches(store):
-        xp_matches = _tag_match(match.experiment.tags, tags, strict)
-        runs = [run for run in match.runs or [] if xp_matches or _tag_match(run.tags, tags, strict)]
+        xp_matches = check(tag in match.experiment.tags for tag in tags)
+        runs = [run for run in match.runs or [] if xp_matches or check(tag in run.tags for tag in tags)]
         if xp_matches or runs:
             selected.append(Selection(match.experiment, runs))
     return selected
@@ -67,9 +142,11 @@ def select_signatures(
                     if all_runs:
                         selected[xp.signature] = (xp, None)
                     else:
-                        runs = [run for run in match.runs or [] if _run_sig(run).startswith(run_sig)]
+                        runs = [run for run in match.runs or [] if run.signature.split("/", 1)[1].startswith(run_sig)]
                         if runs:
-                            selected[xp.signature] = (xp, _collect_runs(selected.get(xp.signature, (xp, []))[1], runs))
+                            existing = selected.get(xp.signature, (xp, []))[1]
+                            seen = {r.signature for r in existing}
+                            selected[xp.signature] = (xp, [*existing, *(r for r in runs if r.signature not in seen)])
     return [Selection(xp, runs) for xp, runs in selected.values()]
 
 
@@ -83,23 +160,3 @@ def _all_matches(store: ExperimentStore | None = None) -> list[Selection]:
     return [Selection(experiment, runs[signature]) for signature, experiment in experiments.items()]
 
 
-def _changed_items(base_cfg: DictConfig, target_cfg: DictConfig, exclude: tp.Sequence[str]) -> list[tuple[str, tp.Any]]:
-    base_items = dict(config_items(base_cfg, exclude))
-    return [(k, v) for k, v in config_items(target_cfg, exclude) if base_items.get(k) != v]
-
-
-def _matches_constraints(cfg: DictConfig, constraints: list[tuple[str, tp.Any]]) -> bool:
-    return all(OmegaConf.select(cfg, key) == value for key, value in constraints)
-
-
-def _tag_match(values: list[str], tags: list[str], strict: bool) -> bool:
-    return all(tag in values for tag in tags) if strict else any(tag in values for tag in tags)
-
-
-def _run_sig(run: ExperimentRun) -> str:
-    return run.signature.split("/", 1)[1]
-
-
-def _collect_runs(current: list[ExperimentRun], new: list[ExperimentRun]) -> list[ExperimentRun]:
-    existing = {run.signature for run in current}
-    return [*current, *(run for run in new if run.signature not in existing)]

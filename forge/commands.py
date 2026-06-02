@@ -10,56 +10,13 @@ from pathlib import Path
 import shutil
 import sys
 
-from hydra import compose, initialize_config_dir
-from omegaconf import DictConfig
-
 from .core import ExperimentStore
-from .matching import (
-    Selection,
-    config_matches,
-    select_signatures,
-    tag_matches,
-    whole_experiments,
-)
-
-
-def _resolve_config_dir(package: str | None, config_dir: str | None) -> Path:
-    """Return the Hydra config directory to use.
-
-    Priority:
-    1. Explicit ``--config-dir`` argument.
-    2. ``<package>/conf/`` when a package name is given and importable.
-    3. ``<cwd>/conf/`` as the default for directory-based projects.
-    """
-    if config_dir:
-        return Path(config_dir)
-    if package:
-        spec = importlib.util.find_spec(package)
-        if spec is None or not spec.submodule_search_locations:
-            raise ModuleNotFoundError(
-                f"Package {package!r} not found. "
-                f"Run from the project directory or pass --config-dir."
-            )
-        return Path(next(iter(spec.submodule_search_locations))) / "conf"
-    # Default: conf/ relative to cwd
-    cwd_conf = Path.cwd() / "conf"
-    if not cwd_conf.is_dir():
-        raise FileNotFoundError(
-            f"No config directory found. Expected {cwd_conf} to exist, "
-            f"or pass --config-dir / -P <package>."
-        )
-    return cwd_conf
+from .matching import Selection, compose_cfg
 
 
 def _load_module(package: str | None, main_module: str):
-    """Import and return the main module.
-
-    When *package* is given, imports ``<package>.<main_module>`` normally.
-    Otherwise loads ``<main_module>.py`` from the current working directory.
-    """
     if package:
         return importlib.import_module(f"{package}.{main_module}")
-
     module_path = Path.cwd() / f"{main_module}.py"
     if not module_path.exists():
         raise FileNotFoundError(
@@ -68,25 +25,11 @@ def _load_module(package: str | None, main_module: str):
         )
     spec = importlib.util.spec_from_file_location(main_module, module_path)
     module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
-    # Make the project directory importable so relative imports inside the
-    # module file work (e.g. ``from . import utils``).
     cwd_str = str(Path.cwd())
     if cwd_str not in sys.path:
         sys.path.insert(0, cwd_str)
     spec.loader.exec_module(module)  # type: ignore[union-attr]
     return module
-
-
-def compose_cfg(
-    package: str | None,
-    overrides: list[str],
-    *,
-    config_dir: str | None = None,
-    config_name: str = "config",
-) -> DictConfig:
-    resolved_config_dir = _resolve_config_dir(package, config_dir)
-    with initialize_config_dir(config_dir=str(resolved_config_dir.resolve()), version_base=None):
-        return compose(config_name=config_name, overrides=overrides)
 
 
 def run(
@@ -100,46 +43,6 @@ def run(
     cfg = compose_cfg(package, overrides, config_dir=config_dir, config_name=config_name)
     module = _load_module(package, main_module)
     return int(module.main(cfg) or 0)
-
-
-def info(
-    package: str | None,
-    overrides: list[str],
-    *,
-    config_dir: str | None = None,
-    config_name: str = "config",
-    store: ExperimentStore | None = None,
-    strict: bool = False,
-) -> list[Selection]:
-    base_cfg = compose_cfg(package, [], config_dir=config_dir, config_name=config_name)
-    target_cfg = compose_cfg(package, overrides, config_dir=config_dir, config_name=config_name)
-    return config_matches(base_cfg, target_cfg, store=store, strict=strict)
-
-
-def select(
-    package: str | None,
-    args: list[str],
-    *,
-    mode: str = "overrides",
-    config_dir: str | None = None,
-    config_name: str = "config",
-    store: ExperimentStore | None = None,
-    strict: bool = False,
-    all_runs: bool = False,
-    whole_xps: bool = False,
-) -> list[Selection]:
-    store = store or ExperimentStore()
-    if mode == "sigs":
-        return select_signatures(args, store=store, all_runs=all_runs)
-    matches = tag_matches(args, store=store, strict=strict) if mode == "tags" else info(
-        package,
-        args,
-        config_dir=config_dir,
-        config_name=config_name,
-        store=store,
-        strict=strict,
-    )
-    return whole_experiments(matches) if whole_xps else matches
 
 
 @dataclass
@@ -158,16 +61,7 @@ def grid(
     config_dir: str | None = None,
     config_name: str = "config",
 ) -> list[GridRun]:
-    """Launch a grid of experiments sequentially and return their outcomes.
-
-    Each run receives *global_overrides* plus its own specific overrides.
-    *direct* and *product* are independent — direct runs are launched first,
-    then every combination from the cartesian product.  They do not cross.
-    """
-    runs_overrides: list[list[str]] = []
-
-    for run_overrides in direct:
-        runs_overrides.append(global_overrides + run_overrides)
+    runs_overrides = [global_overrides + r for r in direct]
 
     if product:
         keys = list(product.keys())
@@ -179,8 +73,6 @@ def grid(
     if not runs_overrides:
         runs_overrides.append(list(global_overrides))
 
-    # Remember cwd — start_run() does os.chdir(run_dir), so we must restore
-    # it after each run so that subsequent config lookups still work.
     original_cwd = Path.cwd()
     results: list[GridRun] = []
     for overrides in runs_overrides:
@@ -201,30 +93,9 @@ def grid(
     return results
 
 
-def artifacts(
-    package: str | None,
-    run_patterns: list[str],
-    artifact_glob: str,
-    *,
-    mode: str = "overrides",
-    config_dir: str | None = None,
-    config_name: str = "config",
-    store: ExperimentStore | None = None,
-    strict: bool = False,
-    all_runs: bool = False,
-) -> list[tuple]:
-    """Return (run, [Path, ...]) pairs for every file matching *artifact_glob*
-    inside each run directory that matches *run_patterns*.
-
-    Only runs with at least one matching file are included.
-    """
-    matches = select(
-        package, run_patterns,
-        mode=mode, config_dir=config_dir, config_name=config_name,
-        store=store, strict=strict, all_runs=all_runs,
-    )
+def artifacts(selections: list[Selection], artifact_glob: str) -> list[tuple]:
     results = []
-    for selection in matches:
+    for selection in selections:
         for run in (selection.runs or []):
             files = sorted(run.path.glob(artifact_glob))
             if files:

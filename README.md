@@ -77,7 +77,6 @@ The `forge` section of your config controls behaviour:
 forge:
   store: null        # path to outputs dir; defaults to ./outputs
   tags: null         # list of string tags attached to every run
-  verbose: true      # print run summary on start
   exclude:           # config keys excluded from the experiment signature hash
     - train.steps_per_epoch
 ```

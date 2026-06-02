@@ -8,7 +8,8 @@ from typing import Any
 import yaml
 
 from . import commands
-from .core import ExperimentStore
+from .core import ExperimentRun, ExperimentStore
+from .matching import query
 from .display import (
     build_grid_table,
     build_metrics_table,
@@ -18,9 +19,6 @@ from .display import (
 )
 
 
-# ---------------------------------------------------------------------------
-# Command handlers
-# ---------------------------------------------------------------------------
 
 def _run_command(args: argparse.Namespace) -> int:
     return commands.run(
@@ -46,7 +44,7 @@ def _info_command(args: argparse.Namespace) -> int:
         if args.sigs_only or args.xps_only or args.all_runs:
             return _usage_error("tag info does not support --sigs-only, --xps-only, or --all-runs")
 
-    matches = _select(args)
+    matches = _query(args)
 
     if not matches:
         print("no xp found")
@@ -75,7 +73,7 @@ def _purge_command(args: argparse.Namespace) -> int:
     if args.sigs_only or args.xps_only:
         return _usage_error("purge does not support --sigs-only or --xps-only")
 
-    targets = _select(args, whole_xps=True)
+    targets = _query(args, whole_xps=True)
 
     if not targets:
         print("no xp found")
@@ -100,7 +98,7 @@ def _store_command(args: argparse.Namespace) -> int:
     if mode_error:
         return _usage_error(mode_error)
 
-    targets = _select(args, whole_xps=True)
+    targets = _query(args, whole_xps=True)
 
     if not targets:
         print("no xp found")
@@ -117,13 +115,11 @@ def _metrics_command(args: argparse.Namespace) -> int:
     if not args.sigs and not args.tags and any("=" not in p for p in args.patterns):
         return _usage_error("override mode expects Hydra overrides like key=value")
 
-    matches = _select(args)
+    matches = _query(args)
     if not matches:
         print("no xp found")
         return 0
 
-    # Resolve runs=None (whole-experiment selections from sig mode) by loading from store
-    from .core import ExperimentRun
     runs: list[ExperimentRun] = []
     for match in matches:
         if match.runs is not None:
@@ -150,17 +146,17 @@ def _artifact_command(args: argparse.Namespace) -> int:
     if not args.sigs and not args.tags and any("=" not in p for p in run_patterns):
         return _usage_error("override mode expects Hydra overrides like key=value")
 
-    results = commands.artifacts(
-        args.package,
+    selections = query(
         run_patterns,
-        artifact_glob,
-        mode=_mode(args),
+        mode="sigs" if args.sigs else "tags" if args.tags else "overrides",
+        package=args.package,
         config_dir=args.config_dir,
         config_name=args.config_name,
         store=ExperimentStore(),
         strict=getattr(args, "strict", False),
         all_runs=getattr(args, "all_runs", False),
     )
+    results = commands.artifacts(selections, artifact_glob)
 
     if not results:
         print("no artifacts found")
@@ -211,7 +207,10 @@ def _grid_command(args: argparse.Namespace) -> int:
             global_overrides = global_overrides[1:]
 
     if grid_file:
-        file_spec = _load_grid_file(grid_file)
+        with open(grid_file, encoding="utf-8") as f:
+            file_spec = yaml.safe_load(f)
+        if not isinstance(file_spec, dict):
+            return _usage_error(f"grid file {grid_file!r} must be a YAML mapping")
         # File values are base; CLI values layer on top
         global_overrides = list(file_spec.get("globals", [])) + global_overrides
         direct = [list(r) for r in file_spec.get("direct", [])] + direct
@@ -244,23 +243,12 @@ def _grid_command(args: argparse.Namespace) -> int:
     return 0
 
 
-# ---------------------------------------------------------------------------
-# CLI utilities
-# ---------------------------------------------------------------------------
 
-def _load_grid_file(path: str) -> dict[str, Any]:
-    with open(path, encoding="utf-8") as f:
-        data = yaml.safe_load(f)
-    if not isinstance(data, dict):
-        raise ValueError(f"Grid file {path!r} must be a YAML mapping")
-    return data
-
-
-def _select(args: argparse.Namespace, *, whole_xps: bool = False) -> list[commands.Selection]:
-    return commands.select(
-        args.package,
+def _query(args: argparse.Namespace, *, whole_xps: bool = False) -> list[commands.Selection]:
+    return query(
         args.patterns,
-        mode=_mode(args),
+        mode="sigs" if args.sigs else "tags" if args.tags else "overrides",
+        package=args.package,
         config_dir=args.config_dir,
         config_name=args.config_name,
         store=ExperimentStore(),
@@ -268,10 +256,6 @@ def _select(args: argparse.Namespace, *, whole_xps: bool = False) -> list[comman
         all_runs=getattr(args, "all_runs", False),
         whole_xps=whole_xps,
     )
-
-
-def _mode(args: argparse.Namespace) -> str:
-    return "sigs" if args.sigs else "tags" if args.tags else "overrides"
 
 
 def _mode_error(args: argparse.Namespace) -> str | None:
@@ -290,9 +274,6 @@ def _usage_error(message: str) -> int:
     return 2
 
 
-# ---------------------------------------------------------------------------
-# Argument parser
-# ---------------------------------------------------------------------------
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="forge")
