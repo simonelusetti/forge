@@ -77,9 +77,12 @@ The `forge` section of your config controls behaviour:
 forge:
   store: null        # path to outputs dir; defaults to ./outputs
   tags: null         # list of string tags attached to every run
-  exclude:           # config keys excluded from the experiment signature hash
+  exclude:           # glob patterns for config keys excluded from the experiment signature hash
     - train.steps_per_epoch
+
 ```
+
+`runtime` is stored per-run in `runtime.yaml` and does not affect the experiment signature.
 
 ## Commands
 
@@ -244,7 +247,7 @@ All CLI commands have a corresponding function importable from `forge`:
 from forge import (
     start_run,        # start a run from a Hydra config
     run,              # compose config + call main()
-    select,           # query experiments/runs
+    query,            # query experiments/runs
     artifacts,        # find files inside run directories
     grid,             # launch a grid of experiments
     failed_runs,      # list all failed runs
@@ -254,9 +257,9 @@ from forge import (
 ```
 
 ```python
-from forge import artifacts, select
+from forge import artifacts, query
 
 # Find all checkpoint files in runs where lr=0.001
-for run, files in artifacts(None, ["model.optim.lr=0.001"], "checkpoints/*.pt"):
+for run, files in artifacts(query(["model.optim.lr=0.001"]), "checkpoints/*.pt"):
     print(run.signature, files)
 ```

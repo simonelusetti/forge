@@ -4,6 +4,7 @@ import atexit
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from hashlib import sha1
+from fnmatch import fnmatchcase
 import json
 import logging
 import os
@@ -95,18 +96,16 @@ def flatten_config(cfg: DictConfig) -> list[tuple[str, tp.Any]]:
 
 def forge_exclude(cfg: DictConfig) -> set[str]:
     """Return the set of config keys to exclude for experiment identity."""
-    forge = OmegaConf.select(cfg, "forge")
-    base = OmegaConf.create(
-        {"forge": OmegaConf.to_container(forge, resolve=True)} if forge else {}
-    )
+    keys = [k for k, _ in flatten_config(cfg)]
+    exclude: set[str] = set()
     for key in list(OmegaConf.select(cfg, "forge.exclude", default=[])):
-        OmegaConf.update(base, key, None, merge=True)
-    return {k for k, _ in flatten_config(base)}
+        exclude.update(match for match in keys if fnmatchcase(match, key))
+    return exclude
 
 
 def canonical_config(cfg: DictConfig, exclude: set[str] | None = None) -> list[tuple[str, tp.Any]]:
     """Flatten *cfg* and remove any keys present in *exclude*."""
-    items = [(k, v) for k, v in flatten_config(cfg) if k != "run"]
+    items = [(k, v) for k, v in flatten_config(cfg) if k not in {"run", "runtime"}]
     return [(k, v) for k, v in items if k not in exclude] if exclude else items
 
 

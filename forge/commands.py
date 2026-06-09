@@ -94,7 +94,8 @@ def grid(
 def artifacts(selections: list[Selection], artifact_glob: str) -> list[tuple]:
     results = []
     for selection in selections:
-        for run in (selection.runs or []):
+        runs = selection.runs if selection.runs is not None else ExperimentStore(root=selection.experiment.path.parents[1]).list_runs(selection.experiment.signature)
+        for run in runs:
             files = sorted(run.path.glob(artifact_glob))
             if files:
                 results.append((run, files))

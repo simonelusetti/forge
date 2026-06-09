@@ -144,9 +144,14 @@ def select_signatures(
                 if xp.signature.startswith(xp_sig):
                     runs = [run for run in match.runs or [] if run.signature.split("/", 1)[1].startswith(run_sig)]
                     if runs:
-                            existing = selected.get(xp.signature, (xp, []))[1]
-                            seen = {r.signature for r in existing}
-                            selected[xp.signature] = (xp, [*existing, *(r for r in runs if r.signature not in seen)])
+                        existing = selected.get(xp.signature)
+                        if existing is None:
+                            selected[xp.signature] = (xp, runs)
+                        elif existing[1] is None:
+                            continue
+                        else:
+                            seen = {r.signature for r in existing[1]}
+                            selected[xp.signature] = (xp, [*existing[1], *(r for r in runs if r.signature not in seen)])
     return [Selection(xp, runs) for xp, runs in selected.values()]
 
 
