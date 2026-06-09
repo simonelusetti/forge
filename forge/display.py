@@ -6,20 +6,10 @@ from typing import Any
 from omegaconf import OmegaConf
 from prettytable import PrettyTable
 
-from .commands import GridRun, Selection
+from .commands import Selection
 from .core import ExperimentRun, canonical_config, flatten_config
 
 
-
-def parse_overrides(overrides: list[str]) -> dict[str, str]:
-    """Parse a list of Hydra override strings into a plain key→value dict."""
-    result: dict[str, str] = {}
-    for override in overrides:
-        stripped = override.lstrip("+~")  # strip +, ++, ~, ~~
-        if "=" in stripped:
-            key, _, val = stripped.partition("=")
-            result[key] = val
-    return result
 
 
 def shorten_keys(keys: list[str]) -> dict[str, str]:
@@ -55,13 +45,12 @@ def xp_config_yaml(cfg) -> str:
 
 
 
-def build_metrics_table(runs: list[ExperimentRun], *, long: bool = False) -> PrettyTable:
-    """Build a PrettyTable summarising *runs* and their metrics.
+def build_metrics_table(runs: list[ExperimentRun], *, long: bool = False, sort: list[str] | None = None) -> PrettyTable:
+    if sort:
+        runs = sorted(runs, key=lambda r: tuple(
+            (r.metrics or {}).get(k, float("inf")) for k in sort
+        ))
 
-    In short mode (default) the varying config keys are collapsed into a single
-    ``overrides`` column using :func:`short_config_str`.  Pass ``long=True``
-    for the full breakdown with one column per key plus launched/status.
-    """
     all_cfg = {}
     for run in runs:
         cfg = run.experiment.config
@@ -102,23 +91,9 @@ def build_metrics_table(runs: list[ExperimentRun], *, long: bool = False) -> Pre
     return table
 
 
-def build_grid_table(results: list[GridRun]) -> PrettyTable:
-    """Build a PrettyTable summarising a grid run's outcomes."""
-    parsed = [parse_overrides(r.overrides) for r in results]
-
-    all_keys = sorted({k for d in parsed for k in d})
-    varying = [k for k in all_keys if len({d.get(k) for d in parsed}) > 1]
-    columns = varying if varying else all_keys
-
-    table = PrettyTable(["overrides", "outcome"])
-    table.align = "l"
-    for result, cfg in zip(results, parsed):
-        table.add_row([short_config_str(cfg, columns), result.outcome])
-    return table
 
 
-
-def print_config_matches(matches: list[Selection]) -> int:
+def print_matches(matches: list[Selection], xps_only: bool = False, metrics_only: bool = False) -> int:
     if not matches:
         print("no xp found")
         return 0
@@ -129,36 +104,22 @@ def print_config_matches(matches: list[Selection]) -> int:
         xp = match.experiment
         print(f"xp: {xp.signature}")
         print(f"path: {xp.path}")
-        print("config:")
-        print(indent(xp_config_yaml(xp.config), "  "))
-        for run in match.runs or []:
-            print()
-            print(f"  run: {run.signature}")
-            print(f"  path: {run.path}")
-            print("  runtime:")
-            print(indent(OmegaConf.to_yaml(run.config, resolve=True).rstrip(), "    "))
-            if run.metrics is not None:
-                print("  metrics:")
-                for k, v in run.metrics.items():
-                    print(f"    {k}: {v}")
-    return 0
-
-
-def print_summary_matches(matches: list[Selection], *, xps_only: bool) -> None:
-    print(f"found {len(matches)} xp(s)")
-    for match in matches:
-        xp = match.experiment
-        print()
-        print(f"xp: {xp.signature}")
-        print(f"path: {xp.path}")
+        if not metrics_only:
+            print("config:")
+            print(indent(xp_config_yaml(xp.config), "  "))
         if not xps_only:
-            runs = match.runs or []
-            print(f"runs: {len(runs)}")
-            for run in runs:
-                status = run.status
-                metrics_str = f"  {run.metrics}" if run.metrics else ""
-                print(f"  - {run.signature}  [{status}]{metrics_str}")
-                print(f"    path: {run.path}")
+            for run in match.runs or []:
+                print()
+                print(f"  run: {run.signature}")
+                print(f"  path: {run.path}")
+                if not metrics_only:
+                    print("  runtime:")
+                    print(indent(OmegaConf.to_yaml(run.config, resolve=True).rstrip(), "    "))
+                if run.metrics is not None:
+                    print("  metrics:")
+                    for k, v in run.metrics.items():
+                        print(f"    {k}: {v}")
+    return 0
 
 
 def print_purge_targets(targets: list[Selection]) -> None:

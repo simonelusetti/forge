@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
+import json
 import importlib
 import importlib.util
 import itertools
@@ -10,7 +10,7 @@ from pathlib import Path
 import shutil
 import sys
 
-from .core import ExperimentStore
+from .core import ExperimentRun, ExperimentStore
 from .matching import Selection, compose_cfg
 
 
@@ -45,12 +45,6 @@ def run(
     return int(module.main(cfg) or 0)
 
 
-@dataclass
-class GridRun:
-    overrides: list[str]
-    outcome: str  # "done" | "failed (exit N)" | "crashed: ExcType: msg"
-
-
 def grid(
     package: str | None,
     global_overrides: list[str],
@@ -60,7 +54,8 @@ def grid(
     main_module: str = "train",
     config_dir: str | None = None,
     config_name: str = "config",
-) -> list[GridRun]:
+    store: ExperimentStore | None = None,
+) -> list[ExperimentRun]:
     runs_overrides = [global_overrides + r for r in direct]
 
     if product:
@@ -73,24 +68,27 @@ def grid(
     if not runs_overrides:
         runs_overrides.append(list(global_overrides))
 
+    resolved_store = store or ExperimentStore()
+    start_time = datetime.now(timezone.utc).isoformat()
     original_cwd = Path.cwd()
-    results: list[GridRun] = []
+
     for overrides in runs_overrides:
+        iteration_start = datetime.now(timezone.utc).isoformat()
         try:
-            exit_code = run(
-                package, overrides,
-                main_module=main_module,
-                config_dir=config_dir,
-                config_name=config_name,
-            )
-            outcome = "done" if exit_code == 0 else f"failed (exit {exit_code})"
-        except Exception as exc:
-            outcome = f"crashed: {type(exc).__name__}: {exc}"
+            run(package, overrides, main_module=main_module,
+                config_dir=config_dir, config_name=config_name)
+        except Exception:
+            # atexit won't fire mid-process — mark crashed runs explicitly
+            for r in resolved_store.list_runs():
+                if r.launched_on >= iteration_start and r.status == "running":
+                    meta_path = r.path / "meta.json"
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                    meta["status"] = "failed"
+                    meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True), encoding="utf-8")
         finally:
             os.chdir(original_cwd)
-        results.append(GridRun(overrides=overrides, outcome=outcome))
 
-    return results
+    return [r for r in resolved_store.list_runs() if r.launched_on >= start_time]
 
 
 def artifacts(selections: list[Selection], artifact_glob: str) -> list[tuple]:

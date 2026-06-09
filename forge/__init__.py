@@ -10,13 +10,13 @@ from .core import (
     start_run,
 )
 from .matching import compose_cfg, query
-from .commands import GridRun, artifacts, failed_runs, grid, purge, run, store_targets
+from .commands import artifacts, failed_runs, grid, purge, run, store_targets
 
 __all__ = [
     "Experiment",
     "ExperimentRun",
     "ExperimentStore",
-    "GridRun",
+
     "Selection",
     "canonical_config",
     "canonical_signature",

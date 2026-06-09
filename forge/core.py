@@ -5,13 +5,16 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from hashlib import sha1
 import json
+import logging
 import os
 from pathlib import Path
 import typing as tp
 import uuid
+from textwrap import indent
 
 from omegaconf import DictConfig, OmegaConf
 
+log = logging.getLogger("forge")
 
 def _mark_failed_on_exit(meta_path: Path) -> None:
     """atexit handler: if the run is still 'running' at process exit, mark it 'failed'."""
@@ -121,7 +124,7 @@ class ExperimentStore:
 
     def start_run(self, cfg: DictConfig, *, verbose: bool = True) -> ExperimentRun:
         signature = canonical_signature(cfg)
-        tags = list(OmegaConf.select(cfg, "forge.tags", default=[]))
+        tags = list(OmegaConf.select(cfg, "forge.tags", default=[]) or [])
         runtime_cfg = OmegaConf.select(cfg, "runtime") or OmegaConf.create({})
 
         exp_dir = (self.xps_dir / signature).resolve()
@@ -153,10 +156,18 @@ class ExperimentStore:
             path=run_dir,
             status="running",
         )
+        
+        logging.basicConfig(
+            level=logging.INFO,
+            format=f"{experiment.signature}/{run_signature} - %(asctime)s - %(levelname)s - %(message)s"
+        )
 
         if verbose:
-            print(f"experiment: {experiment.signature}  tags={experiment.tags}")
-            print(f"run: {run.signature}  tags={run.tags}  launched={run.launched_on}")
+            log.info(f"run: {experiment.signature}/{run_signature} launched={launched_on}")
+            log.info("xp config:")
+            log.info(indent(OmegaConf.to_yaml(experiment.config, resolve=True).rstrip(), "    "))
+            log.info("run config:")
+            log.info(indent(OmegaConf.to_yaml(run.config, resolve=True).rstrip(), "    "))
 
         return run
 

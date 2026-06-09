@@ -70,13 +70,13 @@ def query(
     config_name: str = "config",
     store: ExperimentStore | None = None,
     strict: bool = False,
-    all_runs: bool = False,
+
     whole_xps: bool = False,
 ) -> list[Selection]:
     resolved_store = store or ExperimentStore()
     mode = detect_mode(patterns)
     if mode == "sigs":
-        matches = select_signatures(patterns, store=resolved_store, all_runs=all_runs)
+        matches = select_signatures(patterns, store=resolved_store)
     elif mode == "tags":
         matches = tag_matches(patterns, store=resolved_store, strict=strict)
     else:
@@ -130,7 +130,7 @@ def select_signatures(
     signatures: list[str],
     *,
     store: ExperimentStore | None = None,
-    all_runs: bool = False,
+
 ) -> list[Selection]:
     all_matches = (store or ExperimentStore()).all_selections()
     selected: dict[str, tuple[Experiment, list[ExperimentRun] | None]] = {}
@@ -142,11 +142,8 @@ def select_signatures(
             elif "/" in signature:
                 xp_sig, run_sig = signature.split("/", 1)
                 if xp.signature.startswith(xp_sig):
-                    if all_runs:
-                        selected[xp.signature] = (xp, None)
-                    else:
-                        runs = [run for run in match.runs or [] if run.signature.split("/", 1)[1].startswith(run_sig)]
-                        if runs:
+                    runs = [run for run in match.runs or [] if run.signature.split("/", 1)[1].startswith(run_sig)]
+                    if runs:
                             existing = selected.get(xp.signature, (xp, []))[1]
                             seen = {r.signature for r in existing}
                             selected[xp.signature] = (xp, [*existing, *(r for r in runs if r.signature not in seen)])
