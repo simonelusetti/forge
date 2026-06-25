@@ -123,6 +123,19 @@ class ExperimentStore:
 
     def start_run(self, cfg: DictConfig, *, verbose: bool = True) -> ExperimentRun:
         signature = canonical_signature(cfg)
+
+        if OmegaConf.select(cfg, "forge.attach", default=False):
+            done = [r for r in self.list_runs(signature) if r.status == "done"]
+            if not done:
+                raise RuntimeError(
+                    f"forge.attach is set but no done run exists for experiment {signature!r}"
+                )
+            run = max(done, key=lambda r: r.launched_on)
+            os.chdir(run.path)
+            if verbose:
+                log.info(f"attach: {run.signature}")
+            return run
+
         tags = list(OmegaConf.select(cfg, "forge.tags", default=[]) or [])
         runtime_cfg = OmegaConf.select(cfg, "runtime") or OmegaConf.create({})
 

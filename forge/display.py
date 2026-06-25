@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from fnmatch import fnmatch
 from textwrap import indent
 from typing import Any
 
@@ -45,7 +46,19 @@ def xp_config_yaml(cfg) -> str:
 
 
 
-def build_metrics_table(runs: list[ExperimentRun], *, long: bool = False, sort: list[str] | None = None) -> PrettyTable:
+def _fmt(v: Any) -> str:
+    if isinstance(v, float):
+        return f"{v:.4f}"
+    return "—" if v is None else str(v)
+
+
+def build_metrics_table(
+    runs: list[ExperimentRun],
+    *,
+    long: bool = False,
+    sort: list[str] | None = None,
+    columns: list[str] | None = None,
+) -> PrettyTable:
     if sort:
         runs = sorted(runs, key=lambda r: tuple(
             (r.metrics or {}).get(k, float("inf")) for k in sort
@@ -60,6 +73,8 @@ def build_metrics_table(runs: list[ExperimentRun], *, long: bool = False, sort: 
     varying = [k for k in all_keys if len({str(items.get(k)) for items in all_cfg.values()}) > 1]
 
     metric_keys = sorted({k for run in runs if run.metrics for k in run.metrics})
+    if columns:
+        metric_keys = [k for k in metric_keys if any(fnmatch(k, pat) for pat in columns)]
 
     if long:
         table = PrettyTable(["run", *varying, "launched", "status", *metric_keys])
@@ -67,14 +82,13 @@ def build_metrics_table(runs: list[ExperimentRun], *, long: bool = False, sort: 
         for run in runs:
             cfg = all_cfg[run.signature]
             launched = run.launched_on[:16].replace("T", " ")
-            status = run.status
             metrics = run.metrics or {}
             table.add_row([
                 run.signature,
                 *[cfg.get(k, "—") for k in varying],
                 launched,
-                status,
-                *[metrics.get(k, "—") for k in metric_keys],
+                run.status,
+                *[_fmt(metrics.get(k)) for k in metric_keys],
             ])
     else:
         table = PrettyTable(["run", "overrides", *metric_keys])
@@ -85,7 +99,7 @@ def build_metrics_table(runs: list[ExperimentRun], *, long: bool = False, sort: 
             table.add_row([
                 run.signature,
                 short_config_str(cfg, varying),
-                *[metrics.get(k, "—") for k in metric_keys],
+                *[_fmt(metrics.get(k)) for k in metric_keys],
             ])
 
     return table

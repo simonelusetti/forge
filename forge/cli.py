@@ -97,7 +97,7 @@ def _metrics_command(args: argparse.Namespace) -> int:
         print("no runs found")
         return 0
 
-    print(build_metrics_table(runs, long=args.long, sort=_sort(args, runs)))
+    print(build_metrics_table(runs, long=args.long, sort=_sort(args, runs), columns=args.columns or None))
     return 0
 
 
@@ -199,7 +199,7 @@ def _grid_command(args: argparse.Namespace) -> int:
 
     if results:
         print()
-        print(build_metrics_table(results, long=args.long, sort=_sort(args, results)))
+        print(build_metrics_table(results, long=args.long, sort=_sort(args, results), columns=args.columns or None))
     return 0
 
 
@@ -268,6 +268,7 @@ def _build_parser() -> argparse.ArgumentParser:
     metrics_parser.add_argument("--strict", action="store_true")
     metrics_parser.add_argument("-l", "--long", action="store_true")
     metrics_parser.add_argument("-s", "--sort", nargs="+", metavar="METRIC")
+    metrics_parser.add_argument("-c", "--columns", nargs="+", metavar="GLOB")
     metrics_parser.add_argument("patterns", nargs="*")
     metrics_parser.set_defaults(handler=_metrics_command)
 
@@ -284,6 +285,7 @@ def _build_parser() -> argparse.ArgumentParser:
     grid_parser.add_argument("globals", nargs="*")
     grid_parser.add_argument("-l", "--long", action="store_true")
     grid_parser.add_argument("-s", "--sort", nargs="+", metavar="METRIC")
+    grid_parser.add_argument("-c", "--columns", nargs="+", metavar="GLOB")
     grid_parser.add_argument("--run", action="append", nargs="+", dest="direct", metavar="OVERRIDE")
     grid_parser.add_argument("--sweep", action="append", dest="sweeps", metavar="KEY=V1,V2,...")
     grid_parser.add_argument("--file", dest="grid_file", metavar="YAML")

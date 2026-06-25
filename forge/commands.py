@@ -133,10 +133,12 @@ def store_targets(targets: list[Selection], *, root: Path | str | None = None) -
     for target in targets:
         if target.runs is None:
             shutil.copytree(target.experiment.path, destination / "xps" / target.experiment.signature)
+            shutil.rmtree(target.experiment.path)
         else:
             xp_dir = destination / "xps" / target.experiment.signature
             xp_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy2(target.experiment.path / "config.yaml", xp_dir / "config.yaml")
             for run in target.runs:
                 shutil.copytree(run.path, xp_dir / run.signature.split("/", 1)[1])
+                shutil.rmtree(run.path)
     return destination

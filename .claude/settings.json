@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"from forge.display import build_metrics_table; from forge.cli import main; print\\('OK'\\)\")"
+    ]
+  }
+}
