@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from fnmatch import fnmatch
 from textwrap import indent
 from typing import Any
@@ -14,15 +15,8 @@ from .core import ExperimentRun, canonical_config, flatten_config
 
 
 def shorten_keys(keys: list[str]) -> dict[str, str]:
-    """Map each full dotted key to its last segment (e.g. ``model.optim.lr`` → ``lr``).
-
-    When two keys share the same last segment the full key is kept for both so
-    the meaning stays unambiguous.
-    """
     short = {k: k.rsplit(".", 1)[-1] for k in keys}
-    counts: dict[str, int] = {}
-    for v in short.values():
-        counts[v] = counts.get(v, 0) + 1
+    counts = Counter(short.values())
     return {k: v if counts[v] == 1 else k for k, v in short.items()}
 
 
@@ -39,10 +33,7 @@ def short_config_str(cfg: dict[str, Any], keys: list[str]) -> str:
 
 
 def xp_config_yaml(cfg) -> str:
-    data = OmegaConf.to_container(cfg, resolve=True)
-    if isinstance(data, dict):
-        data.pop("runtime", None)
-    return OmegaConf.to_yaml(OmegaConf.create(data), resolve=True).rstrip()
+    return OmegaConf.to_yaml(OmegaConf.masked_copy(cfg, [k for k in cfg if k != "runtime"]), resolve=True).rstrip()
 
 
 
@@ -64,11 +55,13 @@ def build_metrics_table(
             (r.metrics or {}).get(k, float("inf")) for k in sort
         ))
 
-    all_cfg = {}
+    xp_cfg: dict[str, dict] = {}
     for run in runs:
-        cfg = run.experiment.config
-        exclude = {k for k, _ in flatten_config(cfg) if k.startswith(("forge.", "runtime."))}
-        all_cfg[run.signature] = dict(canonical_config(cfg, exclude or None))
+        if run.experiment.signature not in xp_cfg:
+            cfg = run.experiment.config
+            exclude = {k for k, _ in flatten_config(cfg) if k.startswith(("forge.", "runtime."))}
+            xp_cfg[run.experiment.signature] = dict(canonical_config(cfg, exclude or None))
+    all_cfg = {run.signature: xp_cfg[run.experiment.signature] for run in runs}
     all_keys = sorted({k for items in all_cfg.values() for k in items})
     varying = [k for k in all_keys if len({str(items.get(k)) for items in all_cfg.values()}) > 1]
 
@@ -107,7 +100,7 @@ def build_metrics_table(
 
 
 
-def print_matches(matches: list[Selection], xps_only: bool = False, metrics_only: bool = False) -> int:
+def print_matches(matches: list[Selection], xps_only: bool = False) -> int:
     if not matches:
         print("no xp found")
         return 0
@@ -118,17 +111,15 @@ def print_matches(matches: list[Selection], xps_only: bool = False, metrics_only
         xp = match.experiment
         print(f"xp: {xp.signature}")
         print(f"path: {xp.path}")
-        if not metrics_only:
-            print("config:")
-            print(indent(xp_config_yaml(xp.config), "  "))
+        print("config:")
+        print(indent(xp_config_yaml(xp.config), "  "))
         if not xps_only:
             for run in match.runs or []:
                 print()
                 print(f"  run: {run.signature}")
                 print(f"  path: {run.path}")
-                if not metrics_only:
-                    print("  runtime:")
-                    print(indent(OmegaConf.to_yaml(run.config, resolve=True).rstrip(), "    "))
+                print("  runtime:")
+                print(indent(OmegaConf.to_yaml(run.config, resolve=True).rstrip(), "    "))
                 if run.metrics is not None:
                     print("  metrics:")
                     for k, v in run.metrics.items():

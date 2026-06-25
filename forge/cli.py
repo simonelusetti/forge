@@ -5,11 +5,12 @@ from pathlib import Path
 import sys
 from typing import Any
 
+from omegaconf import OmegaConf
 import yaml
 
 from . import commands
 from .core import ExperimentRun, ExperimentStore
-from .matching import detect_mode, query
+from .matching import query
 from .display import (
     build_metrics_table,
     print_matches,
@@ -42,7 +43,7 @@ def _info_command(args: argparse.Namespace) -> int:
                     print(run.signature)
         return 0
 
-    print_matches(matches, xps_only=args.xps_only, metrics_only=args.metrics_only)
+    print_matches(matches, xps_only=args.xps_only)
     return 0
 
 
@@ -112,7 +113,7 @@ def _artifact_command(args: argparse.Namespace) -> int:
         config_dir=args.config_dir,
         config_name=args.config_name,
         store=ExperimentStore(),
-        strict=getattr(args, "strict", False),
+        strict=args.strict,
 
     )
     results = commands.artifacts(selections, artifact_glob)
@@ -208,7 +209,6 @@ def _sort(args: argparse.Namespace, runs: list[ExperimentRun]) -> list[str]:
     if args.sort:
         return list(args.sort)
     if runs:
-        from omegaconf import OmegaConf
         return list(OmegaConf.select(runs[0].experiment.config, "forge.sort", default=[]) or [])
     return []
 
@@ -220,7 +220,7 @@ def _query(args: argparse.Namespace, *, whole_xps: bool = False) -> list[command
         config_dir=args.config_dir,
         config_name=args.config_name,
         store=ExperimentStore(),
-        strict=getattr(args, "strict", False),
+        strict=args.strict,
 
         whole_xps=whole_xps,
     )
@@ -247,7 +247,6 @@ def _build_parser() -> argparse.ArgumentParser:
     info_parser = subparsers.add_parser("info")
     info_parser.add_argument("-S", "--sigs-only", action="store_true")
     info_parser.add_argument("-X", "--xps-only", action="store_true")
-    info_parser.add_argument("-A", "--metrics-only", action="store_true")
     info_parser.add_argument("--strict", action="store_true")
 
     info_parser.add_argument("patterns", nargs="*")

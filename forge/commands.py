@@ -54,7 +54,6 @@ def grid(
     main_module: str = "train",
     config_dir: str | None = None,
     config_name: str = "config",
-    store: ExperimentStore | None = None,
 ) -> list[ExperimentRun]:
     runs_overrides = [global_overrides + r for r in direct]
 
@@ -68,7 +67,7 @@ def grid(
     if not runs_overrides:
         runs_overrides.append(list(global_overrides))
 
-    resolved_store = store or ExperimentStore()
+    resolved_store = ExperimentStore()
     start_time = datetime.now(timezone.utc).isoformat()
     original_cwd = Path.cwd()
 
@@ -103,16 +102,12 @@ def artifacts(selections: list[Selection], artifact_glob: str) -> list[tuple]:
 
 
 def failed_runs(*, store: ExperimentStore | None = None) -> list[Selection]:
-    """Return one Selection per experiment that has at least one failed run."""
     resolved = store or ExperimentStore()
-    by_xp: dict[str, tuple] = {}
-    for run in resolved.list_runs():
-        if run.status == "failed":
-            sig = run.experiment.signature
-            if sig not in by_xp:
-                by_xp[sig] = (run.experiment, [])
-            by_xp[sig][1].append(run)
-    return [Selection(xp, runs) for xp, runs in by_xp.values()]
+    return [
+        Selection(sel.experiment, [r for r in (sel.runs or []) if r.status == "failed"])
+        for sel in resolved.all_selections()
+        if any(r.status == "failed" for r in (sel.runs or []))
+    ]
 
 
 def purge(targets: list[Selection]) -> None:
@@ -129,7 +124,7 @@ def purge(targets: list[Selection]) -> None:
 
 def store_targets(targets: list[Selection], *, root: Path | str | None = None) -> Path:
     root = Path(root) if root else targets[0].experiment.path.parents[1]
-    destination = root / "stored" / datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    destination = root / "stored" / datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
     for target in targets:
         if target.runs is None:
             shutil.copytree(target.experiment.path, destination / "xps" / target.experiment.signature)
