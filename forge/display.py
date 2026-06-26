@@ -29,7 +29,7 @@ def short_config_str(cfg: dict[str, Any], keys: list[str]) -> str:
     if not keys:
         return "—"
     short = shorten_keys(keys)
-    return "  ".join(f"{short[k]}={cfg.get(k, '—')}" for k in keys)
+    return "\n".join(f"{short[k]}={cfg.get(k, '—')}" for k in keys)
 
 
 def xp_config_yaml(cfg) -> str:
@@ -41,6 +41,33 @@ def _fmt(v: Any) -> str:
     if isinstance(v, float):
         return f"{v:.4f}"
     return "—" if v is None else str(v)
+
+
+def varying_cfg(runs: list[ExperimentRun]) -> tuple[dict[str, dict], list[str]]:
+    xp_cfg: dict[str, dict] = {}
+    for run in runs:
+        if run.experiment.signature not in xp_cfg:
+            cfg = run.experiment.config
+            exclude = {k for k, _ in flatten_config(cfg) if k.startswith(("forge.", "runtime."))}
+            xp_cfg[run.experiment.signature] = dict(canonical_config(cfg, exclude or None))
+    all_cfg = {run.signature: xp_cfg[run.experiment.signature] for run in runs}
+    all_keys = sorted({k for items in all_cfg.values() for k in items})
+    varying = [k for k in all_keys if len({str(items.get(k)) for items in all_cfg.values()}) > 1]
+    return all_cfg, varying
+
+
+def print_metrics_long(runs: list[ExperimentRun], all_cfg: dict, varying: list[str], *, sigs_only: bool = False) -> None:
+    for run in runs:
+        print(run.signature)
+        if not sigs_only:
+            print(indent(short_config_str(all_cfg[run.signature], varying), "  "))
+        if run.metrics:
+            w = max(len(k) for k in run.metrics)
+            for k, v in sorted(run.metrics.items()):
+                print(f"  {k:{w}}  {_fmt(v)}")
+        else:
+            print("  (no metrics)")
+        print()
 
 
 def build_metrics_table(
@@ -55,19 +82,20 @@ def build_metrics_table(
             (r.metrics or {}).get(k, float("inf")) for k in sort
         ))
 
-    xp_cfg: dict[str, dict] = {}
-    for run in runs:
-        if run.experiment.signature not in xp_cfg:
-            cfg = run.experiment.config
-            exclude = {k for k, _ in flatten_config(cfg) if k.startswith(("forge.", "runtime."))}
-            xp_cfg[run.experiment.signature] = dict(canonical_config(cfg, exclude or None))
-    all_cfg = {run.signature: xp_cfg[run.experiment.signature] for run in runs}
-    all_keys = sorted({k for items in all_cfg.values() for k in items})
-    varying = [k for k in all_keys if len({str(items.get(k)) for items in all_cfg.values()}) > 1]
+    all_cfg, varying = varying_cfg(runs)
 
     metric_keys = sorted({k for run in runs if run.metrics for k in run.metrics})
     if columns:
         metric_keys = [k for k in metric_keys if any(fnmatch(k, pat) for pat in columns)]
+
+    # Transpose when metrics outnumber runs — keeps the table terminal-width-friendly
+    if not long and len(metric_keys) > len(runs):
+        table = PrettyTable(["metric", *[r.signature for r in runs]])
+        table.align = "l"
+        table.add_row(["overrides", *[short_config_str(all_cfg[r.signature], varying) for r in runs]])
+        for k in metric_keys:
+            table.add_row([k, *[_fmt((r.metrics or {}).get(k)) for r in runs]])
+        return table
 
     if long:
         table = PrettyTable(["run", *varying, "launched", "status", *metric_keys])

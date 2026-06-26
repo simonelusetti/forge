@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import csv
 from pathlib import Path
 import sys
 from typing import Any
+import uuid
 
 from omegaconf import OmegaConf
 import yaml
@@ -14,7 +16,9 @@ from .matching import query
 from .display import (
     build_metrics_table,
     print_matches,
+    print_metrics_long,
     print_purge_targets,
+    varying_cfg,
 )
 
 
@@ -98,7 +102,50 @@ def _metrics_command(args: argparse.Namespace) -> int:
         print("no runs found")
         return 0
 
+    if args.columns is not None and not args.columns:
+        for k in sorted({k for r in runs if r.metrics for k in r.metrics}):
+            print(k)
+        return 0
+
     print(build_metrics_table(runs, long=args.long, sort=_sort(args, runs), columns=args.columns or None))
+    return 0
+
+
+def _metrics_long_command(args: argparse.Namespace) -> int:
+    matches = _query(args)
+    if not matches:
+        print("no xp found")
+        return 0
+
+    runs: list[ExperimentRun] = []
+    for match in matches:
+        if match.runs is not None:
+            runs.extend(match.runs)
+        else:
+            store = ExperimentStore(root=match.experiment.path.parents[1])
+            runs.extend(store.list_runs(match.experiment.signature))
+
+    if not runs:
+        print("no runs found")
+        return 0
+
+    all_cfg, varying = varying_cfg(runs)
+    print_metrics_long(runs, all_cfg, varying, sigs_only=args.sigs_only)
+
+    store_root = runs[0].experiment.path.parents[1]
+    metrics_dir = store_root / "metrics"
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+
+    all_metric_keys = sorted({k for r in runs if r.metrics for k in r.metrics})
+    csv_path = metrics_dir / (str(uuid.uuid4())[:8] + ".csv")
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["run", "overrides", *all_metric_keys])
+        for run in runs:
+            overrides = "  ".join(f"{k}={all_cfg[run.signature].get(k, '—')}" for k in varying)
+            writer.writerow([run.signature, overrides, *[(run.metrics or {}).get(k, "") for k in all_metric_keys]])
+
+    print(f"→ {csv_path}")
     return 0
 
 
@@ -267,9 +314,15 @@ def _build_parser() -> argparse.ArgumentParser:
     metrics_parser.add_argument("--strict", action="store_true")
     metrics_parser.add_argument("-l", "--long", action="store_true")
     metrics_parser.add_argument("-s", "--sort", nargs="+", metavar="METRIC")
-    metrics_parser.add_argument("-c", "--columns", nargs="+", metavar="GLOB")
+    metrics_parser.add_argument("-c", "--columns", nargs="*", metavar="GLOB")
     metrics_parser.add_argument("patterns", nargs="*")
     metrics_parser.set_defaults(handler=_metrics_command)
+
+    metrics_long_parser = subparsers.add_parser("metrics-long")
+    metrics_long_parser.add_argument("--strict", action="store_true")
+    metrics_long_parser.add_argument("-S", "--sigs-only", action="store_true")
+    metrics_long_parser.add_argument("patterns", nargs="*")
+    metrics_long_parser.set_defaults(handler=_metrics_long_command)
 
     artifact_parser = subparsers.add_parser("artifact")
     artifact_parser.add_argument("args", nargs="+", metavar="PATTERN")
@@ -295,6 +348,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     import argcomplete
+    if argv is None:
+        argv = sys.argv[1:]
+    if len(argv) >= 2 and argv[0] == "metrics" and argv[1] == "long":
+        argv = ["metrics-long", *argv[2:]]
     parser = _build_parser()
     argcomplete.autocomplete(parser)
     args = parser.parse_args(argv)
