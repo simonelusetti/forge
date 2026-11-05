@@ -141,6 +141,8 @@ The default compact view collapses varying config keys into a single `overrides`
 ### `forge grid [globals...] [--run ...] [--sweep ...] [--file YAML]`
 
 Launch a grid of experiments and print an outcome table.
+The grid continues after a failed run, reports its error, and exits nonzero if any run fails.
+Runs that were registered before failing are marked `failed`.
 
 ```bash
 # Cartesian product: 6 runs (3 lr × 2 epochs)

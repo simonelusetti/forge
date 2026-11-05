@@ -4,6 +4,7 @@ import argparse
 import csv
 from pathlib import Path
 import sys
+import traceback
 from typing import Any
 import uuid
 
@@ -235,20 +236,28 @@ def _grid_command(args: argparse.Namespace) -> int:
             "nothing to run — provide globals, --run, --sweep, or --file"
         )
 
-    results = commands.grid(
-        args.package,
-        global_overrides,
-        direct,
-        product,
-        main_module=args.main_module,
-        config_dir=args.config_dir,
-        config_name=args.config_name,
-    )
+    failures = []
+    try:
+        results = commands.grid(
+            args.package,
+            global_overrides,
+            direct,
+            product,
+            main_module=args.main_module,
+            config_dir=args.config_dir,
+            config_name=args.config_name,
+        )
+    except commands.GridRunError as error:
+        results = error.runs
+        failures = error.failures
 
     if results:
         print()
         print(build_metrics_table(results, long=args.long, sort=_sort(args, results), columns=args.columns or None))
-    return 0
+    for overrides, error in failures:
+        print(f"grid failed for {' '.join(overrides) or '(default config)'}:", file=sys.stderr)
+        traceback.print_exception(error, file=sys.stderr)
+    return 1 if failures else 0
 
 
 

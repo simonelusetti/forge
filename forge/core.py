@@ -105,7 +105,8 @@ def forge_exclude(cfg: DictConfig) -> set[str]:
 
 def canonical_config(cfg: DictConfig, exclude: set[str] | None = None) -> list[tuple[str, tp.Any]]:
     """Flatten *cfg* and remove any keys present in *exclude*."""
-    items = [(k, v) for k, v in flatten_config(cfg) if k not in {"run", "runtime"}]
+    items = [(k, v) for k, v in flatten_config(cfg)
+             if k not in {"run", "runtime"} and not k.startswith(("run.", "runtime."))]
     return [(k, v) for k, v in items if k not in exclude] if exclude else items
 
 

@@ -10,8 +10,18 @@ from pathlib import Path
 import shutil
 import sys
 
+from omegaconf import OmegaConf
+
 from .core import ExperimentRun, ExperimentStore
 from .matching import Selection, compose_cfg
+
+
+class GridRunError(RuntimeError):
+    def __init__(self, runs: list[ExperimentRun],
+                 failures: list[tuple[list[str], Exception]]):
+        self.runs = runs
+        self.failures = failures
+        super().__init__(f"{len(failures)} grid run(s) failed")
 
 
 def _load_module(package: str | None, main_module: str):
@@ -67,27 +77,46 @@ def grid(
     if not runs_overrides:
         runs_overrides.append(list(global_overrides))
 
-    resolved_store = ExperimentStore()
-    start_time = datetime.now(timezone.utc).isoformat()
     original_cwd = Path.cwd()
+    results: list[ExperimentRun] = []
+    failures: list[tuple[list[str], Exception]] = []
 
     for overrides in runs_overrides:
-        iteration_start = datetime.now(timezone.utc).isoformat()
+        iteration_store = None
+        previous_runs: set[str] = set()
+        failure = None
         try:
-            run(package, overrides, main_module=main_module,
-                config_dir=config_dir, config_name=config_name)
-        except Exception:
-            # atexit won't fire mid-process — mark crashed runs explicitly
-            for r in resolved_store.list_runs():
-                if r.launched_on >= iteration_start and r.status == "running":
-                    meta_path = r.path / "meta.json"
-                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                    meta["status"] = "failed"
-                    meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True), encoding="utf-8")
+            cfg = compose_cfg(package, overrides, config_dir=config_dir,
+                              config_name=config_name)
+            iteration_store = ExperimentStore(root=OmegaConf.select(cfg, "forge.store", default=None))
+            previous_runs = {r.signature for r in iteration_store.list_runs()}
+            exit_code = run(package, overrides, main_module=main_module,
+                            config_dir=config_dir, config_name=config_name)
+            if exit_code:
+                raise RuntimeError(f"entry point returned exit code {exit_code}")
+        except Exception as error:
+            failure = error
+            failures.append((list(overrides), error))
         finally:
             os.chdir(original_cwd)
+        if iteration_store is not None:
+            created = [r for r in iteration_store.list_runs()
+                       if r.signature not in previous_runs]
+            if failure is not None:
+                for recorded in created:
+                    if recorded.status == "running":
+                        meta_path = recorded.path / "meta.json"
+                        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                        meta["status"] = "failed"
+                        meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True),
+                                             encoding="utf-8")
+                created = [iteration_store.load_run(*r.signature.split("/", 1))
+                           for r in created]
+            results.extend(created)
 
-    return [r for r in resolved_store.list_runs() if r.launched_on >= start_time]
+    if failures:
+        raise GridRunError(results, failures)
+    return results
 
 
 def artifacts(selections: list[Selection], artifact_glob: str) -> list[tuple]:
