@@ -77,6 +77,7 @@ The `forge` section of your config controls behaviour:
 forge:
   store: null        # path to outputs dir; defaults to ./outputs
   tags: null         # list of string tags attached to every run
+  on_finish: null    # optional command argument list; see Completion commands below
   exclude:           # glob patterns for config keys excluded from the experiment signature hash
     - train.steps_per_epoch
 
@@ -238,6 +239,23 @@ Every run has a `status` field in `meta.json`:
 | `failed` | Set automatically if the process exits without calling `finish` |
 
 The `failed` status is written by an `atexit` handler — no try/except needed in your code.
+
+## Completion commands
+
+```yaml
+forge:
+  on_finish: ["/home/me/scripts/experiment-finished"]
+```
+
+After saving results, Forge runs this command with `FORGE_RUN_PATH` (absolute run
+folder) and `FORGE_STATUS` (`done` or `failed`) in its environment. Arguments are
+passed directly, without a shell. Use an absolute script path or a command on
+`PATH`; it runs synchronously in the run folder and should return promptly.
+
+The command is saved per run and excluded from experiment signatures. Errors
+produce warnings without changing results; repeated `finish()` calls do not
+resend it. `null` or `[]` disables it. Grid failures notify immediately; other
+unfinished runs notify at normal Python shutdown, but not after `SIGKILL`.
 
 ---
 

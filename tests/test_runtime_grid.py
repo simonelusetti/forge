@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -56,6 +57,11 @@ class GridFailureTest(unittest.TestCase):
         self.scratch.cleanup()
 
     def test_grid_reports_failures_and_continues(self):
+        config_path = self.root / "conf" / "config.yaml"
+        cfg = OmegaConf.load(config_path)
+        cfg.forge.on_finish = [sys.executable, "-c",
+            "import os; open('notified', 'a').write(os.environ['FORGE_STATUS'] + '\\n')"]
+        OmegaConf.save(cfg, config_path)
         with self.assertRaises(GridRunError) as caught:
             grid(None, [], [["mode=pre"], ["mode=post"], ["mode=exit"],
                             ["mode=ok"]], {})
@@ -63,6 +69,8 @@ class GridFailureTest(unittest.TestCase):
         self.assertEqual([overrides for overrides, _ in error.failures],
                          [["mode=pre"], ["mode=post"], ["mode=exit"]])
         self.assertEqual(sorted(run.status for run in error.runs), ["done", "failed"])
+        for run in error.runs:
+            self.assertEqual((run.path / "notified").read_text(), run.status + "\n")
         self.assertEqual(len(list((self.root / "custom_outputs" / "xps").glob("*/*/meta.json"))), 2)
 
     def test_cli_returns_failure_and_prints_error(self):

@@ -9,6 +9,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import subprocess
 import typing as tp
 import uuid
 from textwrap import indent
@@ -17,15 +18,37 @@ from omegaconf import DictConfig, OmegaConf
 
 log = logging.getLogger("forge")
 
+
+def _notify_finished(meta_path: Path, meta: dict[str, tp.Any]) -> None:
+    command = meta.get("on_finish")
+    if command is None or command == []:
+        return
+    try:
+        if not isinstance(command, list) or not all(isinstance(arg, str) for arg in command):
+            raise ValueError("forge.on_finish must be a list of command arguments")
+        subprocess.run(
+            command,
+            cwd=meta_path.parent,
+            env={**os.environ, "FORGE_RUN_PATH": str(meta_path.parent.resolve()),
+                 "FORGE_STATUS": meta["status"]},
+            stdin=subprocess.DEVNULL,
+            check=True,
+        )
+    except Exception as error:
+        log.warning("forge.on_finish failed for %s: %s", meta_path.parent, error)
+
+
 def _mark_failed_on_exit(meta_path: Path) -> None:
     """atexit handler: if the run is still 'running' at process exit, mark it 'failed'."""
     try:
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        if meta.get("status") == "running":
-            meta["status"] = "failed"
-            meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True), encoding="utf-8")
+        if meta.get("status") != "running":
+            return
+        meta["status"] = "failed"
+        meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True), encoding="utf-8")
     except Exception:
-        pass  # best-effort; don't let a handler crash obscure the original error
+        return  # best-effort; don't let a handler crash obscure the original error
+    _notify_finished(meta_path, meta)
 
 
 @dataclass(frozen=True)
@@ -57,16 +80,18 @@ class ExperimentRun:
 
     def finish(self, metrics: dict[str, float] | None = None) -> ExperimentRun:
         finished_on = datetime.now(timezone.utc).isoformat()
-        meta = json.loads((self.path / "meta.json").read_text(encoding="utf-8"))
+        meta_path = self.path / "meta.json"
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        was_running = meta.get("status") == "running"
         meta["finished_on"] = finished_on
         meta["status"] = "done"
-        (self.path / "meta.json").write_text(
-            json.dumps(meta, indent=2, sort_keys=True), encoding="utf-8"
-        )
         if metrics is not None:
             (self.path / "metrics.json").write_text(
                 json.dumps(metrics, indent=2, sort_keys=True), encoding="utf-8"
             )
+        meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True), encoding="utf-8")
+        if was_running:
+            _notify_finished(meta_path, meta)
         return replace(self, finished_on=finished_on, metrics=metrics, status="done")
 
 
@@ -106,7 +131,8 @@ def forge_exclude(cfg: DictConfig) -> set[str]:
 def canonical_config(cfg: DictConfig, exclude: set[str] | None = None) -> list[tuple[str, tp.Any]]:
     """Flatten *cfg* and remove any keys present in *exclude*."""
     items = [(k, v) for k, v in flatten_config(cfg)
-             if k not in {"run", "runtime"} and not k.startswith(("run.", "runtime."))]
+             if k not in {"run", "runtime", "forge.on_finish"}
+             and not k.startswith(("run.", "runtime.", "forge.on_finish."))]
     return [(k, v) for k, v in items if k not in exclude] if exclude else items
 
 
@@ -147,12 +173,16 @@ class ExperimentStore:
         run_dir = (exp_dir / run_signature).resolve()
         run_dir.mkdir(parents=True, exist_ok=True)
         launched_on = datetime.now(timezone.utc).isoformat()
+        on_finish = OmegaConf.select(cfg, "forge.on_finish")
+        if OmegaConf.is_config(on_finish):
+            on_finish = OmegaConf.to_container(on_finish, resolve=True)
 
         OmegaConf.save(cfg, exp_dir / "config.yaml")
         OmegaConf.save(runtime_cfg, run_dir / "runtime.yaml")
         meta_path = run_dir / "meta.json"
         meta_path.write_text(
-            json.dumps({"launched_on": launched_on, "finished_on": None, "status": "running"},
+            json.dumps({"launched_on": launched_on, "finished_on": None, "status": "running",
+                        "on_finish": on_finish},
                        indent=2, sort_keys=True),
             encoding="utf-8",
         )

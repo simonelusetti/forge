@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import json
 import importlib
 import importlib.util
 import itertools
@@ -12,7 +11,7 @@ import sys
 
 from omegaconf import OmegaConf
 
-from .core import ExperimentRun, ExperimentStore
+from .core import ExperimentRun, ExperimentStore, _mark_failed_on_exit
 from .matching import Selection, compose_cfg
 
 
@@ -105,11 +104,7 @@ def grid(
             if failure is not None:
                 for recorded in created:
                     if recorded.status == "running":
-                        meta_path = recorded.path / "meta.json"
-                        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                        meta["status"] = "failed"
-                        meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True),
-                                             encoding="utf-8")
+                        _mark_failed_on_exit(recorded.path / "meta.json")
                 created = [iteration_store.load_run(*r.signature.split("/", 1))
                            for r in created]
             results.extend(created)
