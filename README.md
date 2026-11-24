@@ -198,10 +198,13 @@ Delete matching experiments or runs (with confirmation).
 
 ```bash
 forge purge model.optim.lr=0.001    # delete runs matching override
-forge purge -S abc123               # delete by signature
-forge purge --force -S abc123       # skip confirmation
+forge purge abc123                 # delete an entire experiment
+forge purge abc123/def456          # delete only this run; preserve sibling runs
+forge purge --force abc123/def456  # same scope, skip confirmation
 ```
 
+Run-specific signatures preserve the selected run scope. The preview
+distinguishes `selected runs` (with their paths) from an `entire experiment`.
 If deleting runs leaves an experiment with no runs, the experiment directory is also removed.
 
 ---

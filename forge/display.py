@@ -159,11 +159,13 @@ def print_purge_targets(targets: list[Selection]) -> None:
     for target in targets:
         xp = target.experiment
         print()
-        runs = target.runs or []
-        marker = "xp" if target.runs is None else "xp runs"
+        whole_experiment = target.runs is None
+        runs = target.runs if target.runs is not None else []
+        marker = "entire experiment" if whole_experiment else "selected runs"
         print(f"{marker}: {xp.signature}")
         print(f"path: {xp.path}")
-        print(f"runs: {len(runs)}")
+        print("runs: all (including all files in the experiment directory)"
+              if whole_experiment else f"runs: {len(runs)}")
         for run in runs:
             print(f"  - {run.signature}")
             print(f"    path: {run.path}")

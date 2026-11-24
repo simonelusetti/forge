@@ -53,7 +53,7 @@ def _info_command(args: argparse.Namespace) -> int:
 
 
 def _purge_command(args: argparse.Namespace) -> int:
-    targets = _query(args, whole_xps=True)
+    targets = _query(args)
 
     if not targets:
         print("no xp found")
